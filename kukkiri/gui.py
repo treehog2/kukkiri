@@ -6,8 +6,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon
+from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, Qt, QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, collect_videos
 from kukkiri.weights import default_dir, missing
 
@@ -35,6 +35,54 @@ _PROGRESS_RE = re.compile(r"^(\w+):\s+([\d.]+)%(?:, ([\d.]+) min left)?")
 _NOISE_RE = re.compile(r"WARN|Warning|^W\d{4} |\[TRT\] \[W\]|^PyNvVideoCodec:|Unable to import quantiz")
 COLS = ["File", "Section", "Status", "Progress", "Time left"]
 
+THEMES = {
+    "light": dict(bg="#f6eedd", card="#fbf6ea", text="#221d1a", muted="#6b6056", rule="#e2d5bc", accent="#d8394f", code="#ede2ca"),
+    "dark": dict(bg="#17130f", card="#1d1813", text="#f1e9e2", muted="#a59a91", rule="#2e2721", accent="#f4606f", code="#231d18"),
+}
+_QSS = """
+QWidget {{ background: {bg}; color: {text}; font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif; font-size: 10pt; }}
+QLineEdit, QPlainTextEdit, QTableWidget {{ background: {card}; border: 1px solid {rule}; border-radius: 6px;
+    selection-background-color: {accent}; selection-color: #ffffff; }}
+QLineEdit {{ padding: 5px 8px; }}
+QLineEdit:focus, QPlainTextEdit:focus {{ border-color: {muted}; }}
+QPlainTextEdit {{ padding: 4px; font-family: Consolas, "SF Mono", Menlo, monospace; font-size: 9pt; }}
+QPushButton {{ background: {card}; border: 1px solid {rule}; border-radius: 8px; padding: 6px 16px; font-weight: 600; }}
+QPushButton:hover {{ border-color: {muted}; }}
+QPushButton:pressed {{ background: {code}; }}
+QPushButton:disabled {{ color: {muted}; }}
+QPushButton#primary {{ background: {accent}; border-color: {accent}; color: #ffffff; }}
+QPushButton#primary:hover {{ border-color: {text}; }}
+QPushButton#primary:disabled {{ background: {rule}; border-color: {rule}; color: {muted}; }}
+QPushButton:flat {{ background: transparent; border: none; color: {muted}; }}
+QPushButton:flat:checked {{ color: {accent}; }}
+QTableWidget {{ gridline-color: {rule}; }}
+QTableWidget::item {{ padding: 4px; }}
+QTableWidget::item:selected {{ background: {code}; color: {text}; }}
+QHeaderView::section {{ background: {code}; color: {muted}; border: none; border-bottom: 1px solid {rule};
+    border-right: 1px solid {rule}; padding: 6px; font-weight: 600; }}
+QTableCornerButton::section {{ background: {code}; border: none; }}
+QProgressBar {{ background: {code}; border: none; border-radius: 5px; margin: 8px 8px; }}
+QProgressBar::chunk {{ background: {accent}; border-radius: 5px; }}
+QStatusBar {{ color: {muted}; }}
+QStatusBar::item {{ border: none; }}
+QMessageBox, QDialog {{ background: {bg}; }}
+"""
+
+
+def apply_theme(app: QApplication) -> None:
+    dark = app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+    t = THEMES["dark" if dark else "light"]
+    app.setStyle("Fusion")
+    pal = app.palette()
+    for role, key in ((QPalette.ColorRole.Window, "bg"), (QPalette.ColorRole.Base, "card"), (QPalette.ColorRole.Text, "text"),
+                      (QPalette.ColorRole.WindowText, "text"), (QPalette.ColorRole.Button, "card"),
+                      (QPalette.ColorRole.ButtonText, "text"), (QPalette.ColorRole.Highlight, "accent"),
+                      (QPalette.ColorRole.PlaceholderText, "muted"), (QPalette.ColorRole.AlternateBase, "code")):
+        pal.setColor(role, QColor(t[key]))
+    pal.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    app.setPalette(pal)
+    app.setStyleSheet(_QSS.format(**t))
+
 
 @dataclass
 class Job:
@@ -55,6 +103,9 @@ def _output_name(job: Job) -> str:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        if not QApplication.instance().property("kukkiri_theme"):
+            apply_theme(QApplication.instance())
+            QApplication.instance().setProperty("kukkiri_theme", True)
         self.setWindowTitle("kukkiri")
         self.resize(980, 620)
         self.setAcceptDrops(True)
@@ -104,6 +155,7 @@ class MainWindow(QMainWindow):
         self.advanced_btn.toggled.connect(lambda on: (form.setRowVisible(0, on), form.setRowVisible(1, on)))
         self.advanced_btn.setChecked(bool(self.outdir.text()))
         self.run_btn = QPushButton("Start")
+        self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self._start_queue)
         self.cancel_btn = QPushButton("Stop")
         self.cancel_btn.clicked.connect(self._cancel)
