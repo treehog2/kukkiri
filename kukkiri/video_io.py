@@ -50,6 +50,24 @@ def probe(video: Path) -> dict:
     }
 
 
+def frame_repeats(video: Path, fps: float, n_frames: int, duration: float) -> list[int] | None:
+    if not (fps and n_frames and duration) or abs(n_frames - duration * fps) <= fps / 2:
+        return None
+    proc = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+         str(video)],
+        capture_output=True, text=True, check=True,
+    )
+    pts = np.sort([float(t) for t in proc.stdout.split() if t not in ("", "N/A")])
+    if len(pts) != n_frames:
+        return None
+    slots = np.round((pts - pts[0]) * fps).astype(np.int64)
+    if slots[-1] + 1 > 2 * n_frames:
+        return None
+    repeats = np.diff(slots, append=slots[-1] + 1)
+    return None if (repeats == 1).all() else repeats.tolist()
+
+
 def extract_frames(video: Path, frames_dir: Path) -> list[Path]:
     frames_dir.mkdir(parents=True, exist_ok=True)
     _run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vsync", "0", str(frames_dir / f"%06d{FRAME_EXT}")])

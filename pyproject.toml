@@ -37,4 +37,4 @@ kukkiri-gui = "kukkiri.gui:main"
 packages = ["kukkiri"]
 
 [tool.setuptools.package-data]
-kukkiri = ["icon.png"]
+kukkiri = ["icon.png", "watermark.png"]

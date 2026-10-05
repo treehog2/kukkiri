@@ -9,11 +9,13 @@ from pathlib import Path
 from PySide6.QtCore import QProcess, QProcessEnvironment, QSettings, Qt, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, collect_videos
-from kukkiri.weights import default_dir, missing
+from kukkiri.weights import MODELS, default_dir, missing, version_of
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
     QHBoxLayout,
@@ -63,6 +65,12 @@ QHeaderView::section {{ background: {code}; color: {muted}; border: none; border
 QTableCornerButton::section {{ background: {code}; border: none; }}
 QProgressBar {{ background: {code}; border: none; border-radius: 5px; margin: 8px 8px; }}
 QProgressBar::chunk {{ background: {accent}; border-radius: 5px; }}
+QComboBox {{ background: {card}; border: 1px solid {rule}; border-radius: 6px; padding: 4px 8px; }}
+QComboBox:focus {{ border-color: {muted}; }}
+QComboBox QAbstractItemView {{ background: {card}; selection-background-color: {code}; selection-color: {text}; }}
+QCheckBox {{ spacing: 6px; }}
+QCheckBox::indicator {{ width: 14px; height: 14px; border: 1px solid {muted}; border-radius: 3px; background: {card}; }}
+QCheckBox::indicator:checked {{ background: {accent}; border-color: {accent}; }}
 QStatusBar {{ color: {muted}; }}
 QStatusBar::item {{ border: none; }}
 QMessageBox, QDialog {{ background: {bg}; }}
@@ -93,11 +101,11 @@ class Job:
     output: Path | None = None
 
 
-def _output_name(job: Job) -> str:
+def _output_name(job: Job, model: str) -> str:
     if not (job.start or job.duration):
-        return f"{job.src.stem}.kukkiri.mp4"
+        return f"{job.src.stem}.kukkiri-{model}.mp4"
     tag = "_".join(t.replace(":", "-") for t in (job.start or "0", job.duration) if t)
-    return f"{job.src.stem}.kukkiri.{tag}.mp4"
+    return f"{job.src.stem}.kukkiri-{model}.{tag}.mp4"
 
 
 class MainWindow(QMainWindow):
@@ -117,7 +125,13 @@ class MainWindow(QMainWindow):
         self._partial = ""
         self._skip_reason = ""
 
-        self.weights = QLineEdit(self.settings.value("weights", "") or str(default_dir()))
+        self.model = QComboBox()
+        for m in MODELS:
+            self.model.addItem(f"{m} (latest)" if m == MODELS[0] else m, m)
+        saved = self.settings.value("model", "")
+        self.model.setCurrentIndex(max(0, self.model.findData(saved)) if saved in MODELS else 0)
+        self.weights = QLineEdit(self.settings.value("weights", "") or str(default_dir(self._version())))
+        self.model.currentIndexChanged.connect(self._model_changed)
         self.outdir = QLineEdit(self.settings.value("outdir", ""))
         self.outdir.setPlaceholderText("next to each input")
         self.start = QLineEdit()
@@ -125,10 +139,11 @@ class MainWindow(QMainWindow):
         self.duration = QLineEdit()
         self.duration.setPlaceholderText("to the end (e.g. 30)")
         form = QFormLayout()
+        form.addRow("Model", self.model)
         form.addRow("Weights folder", self._with_browse(self.weights, "weights"))
-        form.setRowVisible(0, False)
         form.addRow("Output folder", self._with_browse(self.outdir, "outdir"))
-        form.setRowVisible(1, False)
+        for row in range(3):
+            form.setRowVisible(row, False)
         section = QHBoxLayout()
         section.addWidget(QLabel("Start"))
         section.addWidget(self.start)
@@ -152,8 +167,13 @@ class MainWindow(QMainWindow):
         self.advanced_btn = QPushButton("Advanced…")
         self.advanced_btn.setFlat(True)
         self.advanced_btn.setCheckable(True)
-        self.advanced_btn.toggled.connect(lambda on: (form.setRowVisible(0, on), form.setRowVisible(1, on)))
+        self.advanced_btn.toggled.connect(lambda on: [form.setRowVisible(row, on) for row in range(3)])
         self.advanced_btn.setChecked(bool(self.outdir.text()))
+        self.previews = QCheckBox("Before/after previews")
+        self.previews.setToolTip("Also write up to 3 short side-by-side clips (with a kukkiri watermark) of the most "
+                                 "restored moments, next to each restored video")
+        self.previews.setChecked(self.settings.value("previews", "false") == "true")
+        self.previews.toggled.connect(lambda on: self.settings.setValue("previews", "true" if on else "false"))
         self.run_btn = QPushButton("Start")
         self.run_btn.setObjectName("primary")
         self.run_btn.clicked.connect(self._start_queue)
@@ -164,7 +184,7 @@ class MainWindow(QMainWindow):
         for b in (self.add_btn, self.folder_btn, self.remove_btn, self.advanced_btn):
             buttons.addWidget(b)
         buttons.addStretch(1)
-        for b in (self.run_btn, self.cancel_btn):
+        for b in (self.previews, self.run_btn, self.cancel_btn):
             buttons.addWidget(b)
 
         self.log = QPlainTextEdit()
@@ -183,6 +203,14 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(w)
         self.statusBar().showMessage("Add videos or drop them here. Double-click a finished row to open it.")
 
+
+    def _version(self) -> str:
+        return version_of(self.model.currentData())
+
+    def _model_changed(self) -> None:
+        self.settings.setValue("model", self.model.currentData())
+        if not self.settings.value("weights", ""):
+            self.weights.setText(str(default_dir(self._version())))
 
     def _with_browse(self, edit: QLineEdit, key: str) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -259,8 +287,9 @@ class MainWindow(QMainWindow):
 
     def _start_queue(self) -> None:
         weights = Path(self.weights.text())
-        if missing(weights):
-            msg = f"kukkiri needs its model weights (about 240 MB). Download them now into\n{weights}?"
+        if missing(weights, self._version()):
+            msg = (f"kukkiri needs the {self.model.currentData()} model weights (about 240 MB). Download them now "
+                   f"into\n{weights}?")
             if QMessageBox.question(self, "kukkiri", msg) != QMessageBox.StandardButton.Yes:
                 return
         self.run_btn.setEnabled(False)
@@ -277,12 +306,16 @@ class MainWindow(QMainWindow):
             return
         job = self.jobs[self.current]
         outdir = Path(self.outdir.text()) if self.outdir.text() else job.src.parent
-        job.output = outdir / _output_name(job)
+        model = self.model.currentData()
+        job.output = outdir / _output_name(job, model)
         n = 2
         while job.output.exists():
-            job.output = outdir / _output_name(job).replace(".mp4", f" ({n}).mp4")
+            job.output = outdir / _output_name(job, model).replace(".mp4", f" ({n}).mp4")
             n += 1
-        args = ["-m", "kukkiri", "restore", str(job.src), "-o", str(job.output), "--weights", self.weights.text()]
+        args = ["-m", "kukkiri", "restore", str(job.src), "-o", str(job.output), "--weights", self.weights.text(),
+                "--model", model]
+        if self.previews.isChecked():
+            args.append("--previews")
         if job.start:
             args += ["--start", job.start]
         if job.duration:

@@ -130,6 +130,10 @@ class JobSource:
         self.q.put(None)
 
 
+class StreamStalled(RuntimeError):
+    pass
+
+
 def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
     pending, by_frame = source.pending, source.by_frame
     frame_hw = getattr(frames, "hw", None) or frames[0].shape[:2]
@@ -184,10 +188,18 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
     def refine_stage() -> None:
         try:
             stream = torch.cuda.Stream() if torch.cuda.is_available() else None
-            while True:
-                item = q1.get()
+            while not err:
+                try:
+                    item = q1.get(timeout=1)
+                except queue.Empty:
+                    continue
                 if item is None:
-                    q2.put(None)
+                    while not err:
+                        try:
+                            q2.put(None, timeout=5)
+                            return
+                        except queue.Full:
+                            continue
                     return
                 tr, sp, wts, cc, restored = item
                 scale = 1
@@ -223,6 +235,8 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
                         item = q2.get(timeout=0.2)
                     except queue.Empty:
                         tstats["q2_wait"] += _time.time() - t0
+                        if err:
+                            return
                         flush()
                         continue
                     tstats["q2_wait"] += _time.time() - t0
@@ -243,9 +257,34 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
         except BaseException as e:
             err.append(e)
 
+    stall_s = float(os.environ.get("KUKKIRI_STALL_S", "900"))
+    stop_watch = threading.Event()
+
+    def watchdog() -> None:
+        last, since = -1, _time.time()
+        while not stop_watch.wait(5):
+            if err:
+                return
+            if nxt != last:
+                last, since = nxt, _time.time()
+            elif _time.time() - since > stall_s:
+                import faulthandler
+                import sys
+
+                msg = (
+                    f"restore stalled: no frame finished for {stall_s:.0f} s at frame {nxt} (frontier "
+                    f"{source.frontier}, decoded {getattr(frames, 'decoded', '?')}, frames {len(frames)})"
+                )
+                if sys.stderr is not None:
+                    print(msg + "; thread stacks follow", file=sys.stderr, flush=True)
+                    faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                err.append(StreamStalled(msg))
+                return
+
     threads = [threading.Thread(target=refine_stage, daemon=True), threading.Thread(target=tail_stage, daemon=True)]
     for th in threads:
         th.start()
+    threading.Thread(target=watchdog, daemon=True).start()
     B = max(1, int(os.environ.get("KUKKIRI_PRIMARY_BATCH", "8")))
     if hasattr(restorer, "graph_batch"):
         restorer.graph_batch = B
@@ -290,24 +329,28 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
             else:
                 _time.sleep(0.02)
 
-    while not err:
-        try:
-            job = source.q.get(timeout=0.5)
-        except queue.Empty:
-            if full:
-                run_full()
-            continue
-        if job is None:
-            break
-        if len(job[2]) == CLIP:
-            full.append(job)
-            if len(full) == B:
-                run_full()
-        else:
-            make_room(job[0])
-            run_group([job])
-    if full and not err:
-        run_full()
+    try:
+        while not err:
+            try:
+                job = source.q.get(timeout=0.5)
+            except queue.Empty:
+                if full:
+                    run_full()
+                continue
+            if job is None:
+                break
+            if len(job[2]) == CLIP:
+                full.append(job)
+                if len(full) == B:
+                    run_full()
+            else:
+                make_room(job[0])
+                run_group([job])
+        if full and not err:
+            run_full()
+    except BaseException as e:
+        err.append(e)
+        raise
     while True:
         try:
             q1.put(None, timeout=5)
@@ -316,7 +359,10 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
             if err:
                 break
     for th in threads:
+        while th.is_alive() and not err:
+            th.join(timeout=1)
         th.join(timeout=30 if err else None)
+    stop_watch.set()
     if err:
         raise err[0]
     flush()

@@ -19,9 +19,29 @@ _NVC_LOCK = (
 )
 
 
-GPU_READABLE_CONTAINERS = {"mp4", "mov", "matroska"}
+GPU_READABLE_CONTAINERS = {"mp4", "mov"}
 GPU_READABLE_CODECS = {"h264", "hevc"}
 MUXABLE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
+
+
+def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
+    out = Path(out_dir) / "source_repaired.mp4"
+    streams = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+         str(video)],
+        capture_output=True, text=True,
+    )
+    audio_ok = streams.returncode == 0 and all(a in MUXABLE_AUDIO for a in streams.stdout.split())
+    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?"]
+    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p", "-vsync", "cfr"]
+    cmd += ["-c:a", "copy"] if audio_ok else ["-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-movflags", "+faststart", str(out)]
+    t = time.time()
+    run = subprocess.run(cmd, capture_output=True, text=True)
+    if run.returncode != 0 or not out.exists():
+        raise FFmpegError(f"could not repair {Path(video).name} ({run.returncode}): {run.stderr[-500:]}")
+    logger.info(f"{Path(video).name}: repaired copy in {time.time() - t:.0f} s")
+    return out
 
 
 def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
@@ -38,14 +58,15 @@ def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> P
         codecs.setdefault(st.get("codec_type"), st.get("codec_name"))
     container_ok = bool(GPU_READABLE_CONTAINERS & set(j.get("format", {}).get("format_name", "").split(",")))
     video_ok = codecs.get("video") in GPU_READABLE_CODECS
-    audio_ok = codecs.get("audio") is None or codecs.get("audio") in MUXABLE_AUDIO
+    audio = [st.get("codec_name") for st in j.get("streams", []) if st.get("codec_type") == "audio"]
+    audio_ok = all(a in MUXABLE_AUDIO for a in audio)
     if container_ok and video_ok and audio_ok:
         return Path(video)
     out = Path(out_dir) / "source_readable.mp4"
     vcodec = ["-c:v", "copy"] if video_ok else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
     vcodec += [] if video_ok else ["-pix_fmt", "yuv420p", "-vsync", "cfr"]
     acodec = ["-c:a", "copy"] if audio_ok else ["-c:a", "aac", "-b:a", "192k"]
-    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a:0?", *vcodec, *acodec]
+    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?", *vcodec, *acodec]
     cmd += ["-movflags", "+faststart", str(out)]
     t = time.time()
     run = subprocess.run(cmd, capture_output=True, text=True)
@@ -129,12 +150,14 @@ class GpuFrameStore:
             yield batch
 
     def _convert(self, frames) -> list[torch.Tensor]:
-        ts = [_frame_to_tensor(fr, self.device) for fr in frames]
         if self.scale_to is None:
-            return ts
-        x = torch.stack(ts).permute(0, 3, 1, 2).half()
-        x = torch.nn.functional.interpolate(x, size=self.scale_to, mode="area")
-        return list(x.round().clamp(0, 255).to(torch.uint8).permute(0, 2, 3, 1).contiguous())
+            return [_frame_to_tensor(fr, self.device) for fr in frames]
+        out = []
+        for fr in frames:
+            x = _frame_to_tensor(fr, self.device)[None].permute(0, 3, 1, 2).half()
+            x = torch.nn.functional.interpolate(x, size=self.scale_to, mode="area")
+            out.append(x.round().clamp(0, 255).to(torch.uint8)[0].permute(1, 2, 0).contiguous())
+        return out
 
 
 class SharedFrameStore:
@@ -288,12 +311,20 @@ class GpuVideoWriter:
             self._err.append(e)
 
     def write(self, frame_bgr: torch.Tensor) -> None:
-        if self._err:
-            raise RuntimeError(f"encoder thread died: {self._err[0]!r}")
         ev = torch.cuda.Event()
         ev.record(torch.cuda.current_stream())
-        self._q.put((frame_bgr, ev))
+        self._put((frame_bgr, ev))
         self.n += 1
+
+    def _put(self, item) -> None:
+        while True:
+            if self._err:
+                raise RuntimeError(f"encoder thread died: {self._err[0]!r}")
+            try:
+                self._q.put(item, timeout=1)
+                return
+            except queue.Full:
+                continue
 
     def abort(self) -> None:
         try:
@@ -303,7 +334,7 @@ class GpuVideoWriter:
         self._th.join(timeout=10)
 
     def close(self) -> Path:
-        self._q.put(None)
+        self._put(None)
         self._th.join()
         if self._err:
             raise RuntimeError(f"encoder thread died: {self._err[0]!r}")
@@ -315,6 +346,9 @@ class GpuVideoWriter:
             self._f.flush()
             return self.out
         self._f.close()
+        from kukkiri.mux import exact_frame_times
+
+        rate, stamp = exact_frame_times(self.fps)
         proc = subprocess.run(
             [
                 self.ffmpeg,
@@ -322,11 +356,12 @@ class GpuVideoWriter:
                 "-loglevel",
                 "error",
                 "-r",
-                f"{self.fps:.6f}",
+                rate,
                 "-i",
                 str(self.raw),
                 "-c",
                 "copy",
+                *stamp,
                 str(self.out),
             ],
             capture_output=True,

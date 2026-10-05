@@ -2,10 +2,16 @@
 from __future__ import annotations
 
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 
 SEGMENT_S = 4
 HLS_TIME = SEGMENT_S - 0.1
+
+
+def exact_frame_times(fps: float) -> tuple[str, list[str]]:
+    r = Fraction(fps).limit_denominator(1001)
+    return f"{r.numerator}/{r.denominator}", ["-bsf:v", f"setts=ts=N*{r.denominator}/({r.numerator}*TB)"]
 
 
 class LiveMuxer:
@@ -23,19 +29,20 @@ class LiveMuxer:
         self._playlist_dirty = False
         self.dst.parent.mkdir(parents=True, exist_ok=True)
         cmd = [ffmpeg, "-y", "-loglevel", "error", "-hide_banner"]
-        cmd += ["-framerate", f"{fps:.6f}", "-f", "h264", "-i", "pipe:0", "-i", str(self.src)]
+        rate, stamp = exact_frame_times(fps)
+        cmd += ["-framerate", rate, "-f", "h264", "-i", "pipe:0", "-i", str(self.src)]
         cmd += ["-max_interleave_delta", "0"]
-        cut = ["-t", f"{duration_s:.3f}"]
+        cut = ["-t", f"{duration_s + 0.5:.3f}"]
         if self.live_dir:
             self.live_dir.mkdir(parents=True, exist_ok=True)
             cmd += [
-                "-map", "0:v:0", "-map", "1:a?", "-c", "copy", *cut,
+                "-map", "0:v:0", "-map", "1:a?", "-c", "copy", *stamp, *cut,
                 "-f", "hls", "-hls_time", str(HLS_TIME), "-hls_playlist_type", "event", "-hls_list_size", "0",
                 "-hls_segment_type", "fmp4", "-hls_fmp4_init_filename", "init.mp4",
                 "-hls_segment_filename", str(self.live_dir / "seg_%05d.m4s"),
                 "-hls_flags", "temp_file+independent_segments", str(self.playlist),
             ]
-        cmd += ["-map", "0:v:0", "-map", "1:a?", "-c", "copy", *cut, "-movflags", "+faststart", str(self.dst)]
+        cmd += ["-map", "0:v:0", "-map", "1:a?", "-c", "copy", *stamp, *cut, "-movflags", "+faststart", str(self.dst)]
         self.proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
         self.stdin = self.proc.stdin
 

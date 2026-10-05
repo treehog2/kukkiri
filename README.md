@@ -62,6 +62,10 @@ TensorRT engines are built into the same folder on the first run, which takes a 
 kukkiri restore input.mp4 -o restored.mp4
 ```
 
+Without `-o` the result goes next to the input as `<name>.kukkiri-kiyo-v4.mp4`, named after the model. `--model`
+picks the model (the latest by default; `kiyo-v3` is also available) and `--previews` also writes up to three
+watermarked before/after clips of the most restored moments.
+
 Before restoring, kukkiri samples the file's keyframes and skips inputs with nothing to restore: videos that are
 already uncensored, copies another tool has already processed, or footage with no censoring at all. Pass
 `--skip-check` to restore anyway.
@@ -76,7 +80,7 @@ kukkiri restore movies/ extra.mkv -o restored/
 ```
 
 Files are restored one after another; a file that is declined or fails is reported and the batch goes on, with a
-summary at the end. Earlier kukkiri outputs (`*.kukkiri.mp4`) in those folders are left out.
+summary at the end. Earlier kukkiri outputs (`*.kukkiri*.mp4`) in those folders are left out.
 
 To restore only part of a video, for example a 30-second preview:
 

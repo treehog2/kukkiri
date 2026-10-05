@@ -8,32 +8,56 @@ import urllib.request
 from pathlib import Path
 
 VERSION = "v4"
-BASE_URL: str | None = f"https://huggingface.co/treehog/kukkiri/resolve/main/{VERSION}"
-ONNX = "export_b32_fp16/rfdetr-seg-medium.h16.onnx"
-FILES = {
-    f"kiyo-{VERSION}-detector.safetensors": (
-        "detector.safetensors", 141176868, "43a37ca65c3d6a6d8cca9c2feb8e5621b908bb085a718208f790a62ccb821327"
-    ),
-    f"kiyo-{VERSION}-detector.json": (
-        "detector.json", 2326, "c9367acbefd8df6a6e526e4f84f920e1eb0a0f3c091436474533131bb85a4429"
-    ),
-    f"kiyo-{VERSION}-restorer.safetensors": (
-        "restorer.safetensors", 39085084, "c7480977eb35246682fe6256959f7afe79f6db1f17ae8f6c2c16488a5fc6f766"
-    ),
-    f"kiyo-{VERSION}-detector-b32-fp16.onnx": (
-        ONNX, 65103632, "a9371a3a7899cc22e6be127cb1fb7b61e7cc79e2eeb5523a3eb13afbd2c107e0"
-    ),
+BASE = "https://huggingface.co/treehog/kukkiri/resolve/main"
+BASE_URL: str | None = f"{BASE}/{VERSION}"
+RELEASES = {
+    "v4": ("seg_medium", {
+        "detector.safetensors": ("detector.safetensors", 141176868, "43a37ca65c3d6a6d8cca9c2feb8e5621b908bb085a718208f790a62ccb821327"),
+        "detector.json": ("detector.json", 2326, "c9367acbefd8df6a6e526e4f84f920e1eb0a0f3c091436474533131bb85a4429"),
+        "restorer.safetensors": ("restorer.safetensors", 39085084, "c7480977eb35246682fe6256959f7afe79f6db1f17ae8f6c2c16488a5fc6f766"),
+        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-medium.h16.onnx", 65103632, "a9371a3a7899cc22e6be127cb1fb7b61e7cc79e2eeb5523a3eb13afbd2c107e0"),
+    }),
+    "v3": ("seg_small", {
+        "detector.safetensors": ("detector.safetensors", 135624836, "fbdd397d840844568c3a566c27ecda2ea5ad820bd9668bf6a6d73e3ef6982b31"),
+        "detector.json": ("detector.json", 2323, "4515f9d18d358b3069b46f4a8b47e2162e4d2d278a577b06010cc17ce643852e"),
+        "restorer.safetensors": ("restorer.safetensors", 39085084, "c7480977eb35246682fe6256959f7afe79f6db1f17ae8f6c2c16488a5fc6f766"),
+        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-small.h16.onnx", 63087963, "d224477c56d52d4b71d598ed408d5cc7fb04cf915480115356c7f0037ca9268a"),
+    }),
 }
+MODELS = [f"kiyo-{v}" for v in RELEASES]
 
 
-def default_dir() -> Path:
+def version_of(model: str | None) -> str:
+    v = (model or f"kiyo-{VERSION}").removeprefix("kiyo-")
+    if v not in RELEASES:
+        raise ValueError(f"unknown model {model!r}; choose one of {', '.join(MODELS)}")
+    return v
+
+
+def detector_size(version: str = VERSION) -> str:
+    return RELEASES[version][0]
+
+
+def files(version: str = VERSION) -> dict:
+    return {f"kiyo-{version}-{k}": v for k, v in RELEASES[version][1].items()}
+
+
+def onnx_name(version: str = VERSION) -> str:
+    return RELEASES[version][1]["detector-b32-fp16.onnx"][0]
+
+
+ONNX = onnx_name()
+FILES = files()
+
+
+def default_dir(version: str = VERSION) -> Path:
     if os.environ.get("KUKKIRI_WEIGHTS"):
         return Path(os.environ["KUKKIRI_WEIGHTS"])
     if sys.platform == "win32":
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / "kukkiri" / "weights" / VERSION
+    return base / "kukkiri" / "weights" / version
 
 
 def _sha256(path: Path) -> str:
@@ -44,25 +68,26 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def verify(dest: Path) -> list[str]:
+def verify(dest: Path, version: str = VERSION) -> list[str]:
     bad = []
-    for name, (local, size, sha) in FILES.items():
+    for name, (local, size, sha) in files(version).items():
         p = Path(dest) / local
         if not p.is_file() or p.stat().st_size != size or _sha256(p) != sha:
             bad.append(name)
     return bad
 
 
-def download(dest: Path, base_url: str | None = None, log=print) -> None:
-    base = (base_url or BASE_URL or "").rstrip("/")
+def download(dest: Path, base_url: str | None = None, log=print, version: str = VERSION) -> None:
+    base = (base_url or f"{BASE}/{version}").rstrip("/")
     if not base:
         raise RuntimeError("no download location; pass it with --base-url")
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    todo = verify(dest)
+    todo = verify(dest, version)
+    table = files(version)
     for name in todo:
-        local, size, sha = FILES[name]
-        if local == ONNX:
+        local, size, sha = table[name]
+        if local == onnx_name(version):
             _drop_stale_derived(dest)
         part = dest / f"{local}.part"
         part.parent.mkdir(parents=True, exist_ok=True)
@@ -79,19 +104,19 @@ def download(dest: Path, base_url: str | None = None, log=print) -> None:
             part.unlink(missing_ok=True)
             raise RuntimeError(f"{name}: download does not match the release (size {got}, sha256 {h.hexdigest()})")
         part.replace(dest / local)
-    if todo and base.endswith(f"/{VERSION}"):
+    if todo and base.endswith(f"/{version}"):
         try:
-            urllib.request.urlopen(f"{base[: -len(VERSION) - 1]}/config.json", timeout=10).close()
+            urllib.request.urlopen(f"{base[: -len(version) - 1]}/config.json", timeout=10).close()
         except OSError:
             pass
-    log(f"weights {VERSION} ready in {dest}")
+    log(f"weights kiyo-{version} ready in {dest}")
 
 
-def missing(weights_dir: Path) -> list[str]:
+def missing(weights_dir: Path, version: str = VERSION) -> list[str]:
     d = Path(weights_dir)
     out = []
     release = (d / "detector.safetensors").is_file() and (d / "detector.json").is_file()
-    if release and not (d / ONNX).is_file():
+    if release and not (d / onnx_name(version)).is_file():
         out.append("detector")
     elif not ((d / "detector.pth").is_file() or release):
         out.append("detector")

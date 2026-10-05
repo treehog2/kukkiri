@@ -10,9 +10,11 @@ import tempfile
 import threading
 import time
 from dataclasses import asdict, dataclass, field
+from itertools import accumulate
 from pathlib import Path
 from typing import Callable
 
+from kukkiri.errors import SourceTruncated
 
 logger = logging.getLogger(__name__)
 
@@ -85,10 +87,14 @@ def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch
     return detector, restorer
 
 
+ENCODE_MAX_SIDE = 4096
+
+
 def _output_size(height: int, width: int, max_pixels: int | None) -> tuple[int, int] | None:
-    if not max_pixels or height * width <= max_pixels:
+    f = (1920 * 1080 / (height * width)) ** 0.5 if max_pixels and height * width > max_pixels else 1.0
+    f = min(f, ENCODE_MAX_SIDE / max(height, width, 1))
+    if f >= 1.0:
         return None
-    f = (1920 * 1080 / (height * width)) ** 0.5
     return int(height * f / 2) * 2, int(width * f / 2) * 2
 
 
@@ -178,10 +184,9 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
                 stats["n_detections"] += len(dets)
                 close(tk.push(fi, dets))
                 for tr in tk.active:
-                    if is_face_track(tr):
-                        continue
                     for job in em.poll(tr, tk.confirmed[tr.track_id]):
-                        source.put(job)
+                        if not is_face_track(tr):
+                            source.put(job)
                 source.advance(min([em.next_start(tr) for tr in tk.active] + [fi + 1]))
                 fi += 1
         close(tk.finish())
@@ -189,7 +194,28 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
         stats["n_frames"] = fi
 
 
-def remaster(
+def remaster(src: str | Path, dst: str | Path, weights_dir: str | Path, **kwargs) -> RemasterResult:
+    try:
+        return _remaster_once(src, dst, weights_dir, **kwargs)
+    except SourceTruncated as e:
+        logger.warning(f"{e}: retrying from a repaired copy")
+        from kukkiri.video_io import probe
+        from kukkiri.video_io_gpu import repair_source
+
+        work = Path(tempfile.mkdtemp(prefix="repair_", dir=str(kwargs["scratch"]) if kwargs.get("scratch") else None))
+        try:
+            repaired = repair_source(Path(src), work, ffmpeg=kwargs.get("ffmpeg", "ffmpeg"))
+            got = int(probe(repaired).get("nb_frames") or 0)
+            if got < e.expected - max(2, round(e.fps)):
+                raise SourceTruncated(got, e.expected, e.fps) from e
+            if kwargs.get("live_dir"):
+                shutil.rmtree(kwargs["live_dir"], ignore_errors=True)
+            return _remaster_once(repaired, dst, weights_dir, original=src, **kwargs)
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+
+
+def _remaster_once(
     src: str | Path,
     dst: str | Path,
     weights_dir: str | Path,
@@ -201,6 +227,7 @@ def remaster(
     scratch: str | Path | None = None,
     live_dir: str | Path | None = None,
     on_live_file: LiveCallback | None = None,
+    original: str | Path | None = None,
 ) -> RemasterResult:
     from kukkiri.mux import LiveMuxer
     from kukkiri.streaming import (
@@ -208,7 +235,7 @@ def remaster(
         JobSource,
         restore_stream,
     )
-    from kukkiri.video_io import probe
+    from kukkiri.video_io import frame_repeats, probe
     from kukkiri.video_io_gpu import (
         GpuVideoWriter,
         SharedFrameStore,
@@ -223,7 +250,7 @@ def remaster(
     work = Path(tempfile.mkdtemp(prefix="kukkiri_", dir=str(scratch) if scratch else None))
     readable = gpu_readable_source(src, work, ffmpeg=ffmpeg)
     info = probe(readable)
-    input_bitrate = info.get("bit_rate") if readable == src else probe(src).get("bit_rate")
+    input_bitrate = info.get("bit_rate") if readable == src and not original else probe(original or src).get("bit_rate")
     src = readable
     fps = float(info.get("fps") or 30.0)
     n_frames = int(info.get("nb_frames") or 0)
@@ -239,8 +266,21 @@ def remaster(
 
     t2 = time.time()
     scale_to = _output_size(height, int(info.get("width") or 0), cfg.max_pixels)
-    frames = SharedFrameStore(src, scale_to=scale_to)
+    try:
+        frames = SharedFrameStore(src, scale_to=scale_to)
+    except Exception as e:
+        import PyNvVideoCodec as nvc
+
+        shutil.rmtree(work, ignore_errors=True)
+        if not isinstance(e, nvc.PyNvVCException):
+            raise
+        logger.warning(f"{src.name}: GPU decoder cannot open the source: {' | '.join(str(e).strip().splitlines()[:3])}")
+        raise SourceTruncated(0, n_frames, fps) from e
     n_frames = n_frames or len(frames)
+    repeats = frame_repeats(src, fps, n_frames, float(info.get("duration") or 0))
+    n_out = sum(repeats) if repeats else n_frames
+    if repeats:
+        logger.info(f"variable frame rate: {n_frames} frames over {info.get('duration')} s -> {n_out} at {fps:.3f} fps")
     if scale_to:
         logger.info(f"source {height}p served at {scale_to[0]}p ({scale_to[1]}x{scale_to[0]})")
     src_bitrate = input_bitrate
@@ -249,7 +289,7 @@ def remaster(
     cap = int(min(max(bitrate_factor * src_bitrate, min_bitrate), max_bitrate)) if src_bitrate else None
     logger.info(f"encode: source {(input_bitrate or 0) / 1e6:.2f} Mbps -> cap {cap / 1e6 if cap else None} Mbps")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    mux = LiveMuxer(src, dst, fps, n_frames / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg)
+    mux = LiveMuxer(src, dst, fps, n_out / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg)
     writer = GpuVideoWriter(
         work / "video.mp4", frames.hw[1], frames.hw[0], fps, qp=qp, ffmpeg=ffmpeg, max_bitrate=cap, preset=cfg.preset,
         stream=mux.stdin, idr_period=mux.idr_period(fps) if live_dir else None,
@@ -264,7 +304,8 @@ def remaster(
 
     def sink(fi, f):
         nonlocal done
-        writer.write(f)
+        for _ in range(repeats[fi] if repeats and fi < len(repeats) else 1):
+            writer.write(f)
         done += 1
         now = time.time()
         if now - last[0] > 2:
@@ -289,13 +330,23 @@ def remaster(
         producer.join()
         if "error" in pstats:
             raise pstats["error"]
+        if n_frames and pstats["n_frames"] < n_frames - max(2, round(fps)):
+            raise SourceTruncated(pstats["n_frames"], n_frames, fps)
         writer.close()
     except BaseException:
+        logger.error(
+            f"remaster failed after {done} frames written ({getattr(frames, 'decoded', '?')} decoded, "
+            f"{n_frames} expected)"
+        )
         writer.abort()
         mux.kill()
         raise
     remaster_s = time.time() - t2
     n_frames = pstats["n_frames"]
+    tracks = pstats["tracks"]
+    if repeats:
+        off = list(accumulate(repeats, initial=0))
+        tracks = [(off[min(s, len(repeats))], off[min(e, len(repeats))], a) for s, e, a in tracks]
     d = {
         **{k: v for k, v in pstats.items() if k != "tracks"},
         "n_windows": source.n_jobs,
@@ -326,5 +377,5 @@ def remaster(
         source_bitrate=int(input_bitrate or 0),
         output_bitrate=int(probe(dst).get("bit_rate") or 0),
         output_bytes=dst.stat().st_size,
-        tracks=pstats["tracks"],
+        tracks=tracks,
     )

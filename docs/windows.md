@@ -72,8 +72,10 @@ Clear the two fields again before adding more whole videos.
 
 ## Advanced
 
-**Advanced…** shows two more settings, which kukkiri remembers:
+**Advanced…** shows three more settings, which kukkiri remembers:
 
+- **Model:** which kiyo model restores, by default the latest (`kiyo-v4`). An older one (`kiyo-v3`) is there for
+  comparison; it is downloaded the first time you use it.
 - **Weights folder:** where the models are kept, by default `%LOCALAPPDATA%\kukkiri\weights\<version>`. Change it
   only if you keep the models somewhere else.
 - **Output folder:** where restored videos go. Empty means next to each original.
@@ -103,14 +105,22 @@ row to play the restored video.
 
 ## The restored files
 
-Restored videos are named after the original with `.kukkiri` added: `beach-day.mp4` becomes `beach-day.kukkiri.mp4`.
-A section also carries its start and duration, so `party-night.mp4` restored from 0:02 for 5 seconds becomes
-`party-night.kukkiri.0-02_5.mp4`.
+Restored videos are named after the original plus `.kukkiri` and the model that restored them: `beach-day.mp4`
+becomes `beach-day.kukkiri-kiyo-v4.mp4`. A section also carries its start and duration, so `party-night.mp4` restored
+from 0:02 for 5 seconds becomes `party-night.kukkiri-kiyo-v4.0-02_5.mp4`. (The screenshot below is from an earlier
+version, before the model was part of the name.)
 
 ![Originals and restored files side by side](media/windows/output-files.png)
 
 The restored video keeps the original's resolution, frame rate and audio. Pixelated faces are recognised as such and
 always left as they are.
+
+## Before/after previews
+
+Tick **Before/after previews** (next to **Start**) to also get up to three 30-second side-by-side clips of each
+video: the original on the left, the restored video on the right, from the moments with the most restoration. They
+are saved next to the restored video as `<name>.kukkiri-kiyo-v4.preview-<start>.mp4`, carry a small kukkiri
+watermark in the top right corner and have no sound, ready to share. The restored video itself never has a watermark.
 
 ## Stop, and files that fail
 
