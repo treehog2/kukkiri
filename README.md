@@ -13,6 +13,9 @@ bounded window of frames is ever held in memory, so a two-hour film needs no mor
 
 *Left to right: original, mosaic, kukkiri. An AI-generated clip with a synthetic mosaic; click for the full-quality video.*
 
+**On Windows:** download the installer, [kukkiri-setup.exe](https://huggingface.co/treehog/kukkiri/resolve/main/windows/kukkiri-setup.exe) (about 3 GB), and follow the
+[Windows guide](docs/windows.md), which walks through installing and using the app with screenshots.
+
 ## Requirements
 
 - An NVIDIA GTX 16-series / RTX 20-series or newer GPU (compute capability 7.5+) and driver 580 or newer
