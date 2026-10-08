@@ -11,6 +11,7 @@ from kukkiri.weights import MODELS
 
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".m4v", ".webm", ".flv"}
+SENSITIVITY = {"normal": 1.0, "high": 0.6, "low": 1.4}
 OUTPUT_TAG = ".kukkiri"
 
 
@@ -168,16 +169,24 @@ def _restore_one(src: Path, dst: Path, args) -> int:
 
 
 def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
+    import time
+
+    first = {}
+
     def progress(ev):
         eta = f", {ev.eta_s / 60:.1f} min left" if ev.eta_s else ""
-        print(f"\r{ev.stage}: {ev.pct:5.1f}%{eta}   ", end="", file=sys.stderr, flush=True)
+        t0, f0 = first.setdefault(ev.stage, (time.monotonic(), ev.frames_done))
+        dt = time.monotonic() - t0
+        fps = f", {(ev.frames_done - f0) / dt:.0f} fps" if ev.stage == "remaster" and dt > 2 else ""
+        print(f"\r{ev.stage}: {ev.pct:5.1f}%{eta}{fps}   ", end="", file=sys.stderr, flush=True)
 
     from kukkiri.remaster import RemasterConfig
 
     from kukkiri.weights import detector_size, version_of
 
     cfg = RemasterConfig(detector_size=detector_size(version_of(args.model)),
-                         max_pixels=1920 * 1088 if args.max_1080p else None)
+                         max_pixels=1920 * 1088 if args.max_1080p else None,
+                         threshold_scale=SENSITIVITY[args.sensitivity])
     existed = Path(dst).exists()
     try:
         r = remaster(src, dst, weights, config=cfg, threshold=args.threshold, ffmpeg=args.ffmpeg, progress=progress)
@@ -190,6 +199,77 @@ def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
         from kukkiri.preview import make_previews
 
         make_previews(src, Path(r.output), r, ffmpeg=args.ffmpeg, log=lambda m: print(m, file=sys.stderr))
+    return 0
+
+
+def _check(args) -> int:
+    import json
+    import shutil
+    import subprocess
+
+    from kukkiri.weights import default_dir, missing, verify, version_of
+
+    def emit(item, status, detail, item_args=None, **kw):
+        print(json.dumps({"item": item, "item_args": item_args or {}, "status": status, "detail": detail, "args": kw},
+                         ensure_ascii=False), flush=True)
+
+    version = version_of(args.model)
+    model = f"kiyo-{version}"
+    weights = Path(args.weights) if args.weights else default_dir(version)
+    problem = _gpu_problem()
+    import torch
+
+    if problem:
+        if not torch.cuda.is_available():
+            emit("Graphics card", "fail", "no NVIDIA GPU found")
+        else:
+            emit("Graphics card", "fail", "{name}: needs a GTX 16-series / RTX 20-series or newer",
+                 name=torch.cuda.get_device_name())
+    else:
+        emit("Graphics card", "ok", "{name}", name=torch.cuda.get_device_name())
+    driver = None
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        driver = pynvml.nvmlSystemGetDriverVersion()
+    except Exception:
+        found = _windows_nvidia_adapters() if sys.platform == "win32" else None
+        driver = f"{found[0][1]:.2f}" if found else None
+    if driver:
+        old = float(".".join(str(driver).split(".")[:2])) < 580
+        emit("NVIDIA driver", "fail" if old else "ok",
+             "{version}: update to 580 or newer (nvidia.com/drivers)" if old else "{version}", version=driver)
+    if not problem:
+        free, total = (b / 1e9 for b in torch.cuda.mem_get_info())
+        busy = free < 2.0
+        emit("GPU memory", "warn" if busy else "ok",
+             "{free} of {total} GB free: close other programs using the GPU" if busy else "{free} of {total} GB free",
+             free=f"{free:.1f}", total=f"{total:.1f}")
+    where = weights
+    while not where.exists() and where != where.parent:
+        where = where.parent
+    free = shutil.disk_usage(where).free / 1e9
+    emit("Free disk space", "warn" if free < 5 else "ok",
+         "{free} GB free on {path}: free some space before restoring" if free < 5 else "{free} GB free on {path}",
+         free=f"{free:.0f}", path=str(where))
+    if missing(weights, version):
+        emit("Model files ({model})", "info", "not downloaded yet: the first restore downloads them (about 240 MB)",
+             {"model": model})
+    elif verify(weights, version):
+        emit("Model files ({model})", "fail", "damaged: delete {path} and restore again to download them anew",
+             {"model": model}, path=str(weights))
+    else:
+        emit("Model files ({model})", "ok", "downloaded and verified", {"model": model})
+    ff = shutil.which(args.ffmpeg)
+    if ff:
+        out = subprocess.run([ff, "-version"], capture_output=True, text=True).stdout.split()
+        emit("ffmpeg", "ok", "{version}", version=out[2] if len(out) > 2 else ff)
+    else:
+        emit("ffmpeg", "fail", "not found")
+    prepared = any(weights.glob("export_*/*.engine")) and any(weights.glob("primary_steps/*.ep"))
+    emit("GPU preparation", "ok" if prepared else "info",
+         "done" if prepared else "not yet: the first restore takes 10 to 20 minutes longer")
     return 0
 
 
@@ -207,6 +287,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder); "
                    "missing weights are downloaded on first use")
     r.add_argument("--threshold", type=float, default=None, help="detector score threshold (default: by resolution)")
+    r.add_argument("--sensitivity", choices=list(SENSITIVITY), default="normal",
+                   help="how readily mosaics are detected: high also finds faint or small ones, low makes fewer "
+                   "false detections (ignored with --threshold)")
     r.add_argument("--start", help="restore only from this time (seconds, mm:ss or hh:mm:ss)")
     r.add_argument("--duration", help="restore only this long (seconds, mm:ss or hh:mm:ss)")
     r.add_argument("--skip-check", action="store_true", help="restore even if the input looks uncensored")
@@ -217,7 +300,13 @@ def main(argv: list[str] | None = None) -> None:
     d.add_argument("dest", nargs="?", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
     d.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
     d.add_argument("--base-url", help="download location, if not the default")
+    c = sub.add_parser("check", help="check this machine: GPU, driver, memory, disk, model files, ffmpeg")
+    c.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
+    c.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
+    c.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
     args = p.parse_args(argv)
+    if args.cmd == "check":
+        sys.exit(_check(args))
     if args.cmd == "download-weights":
         from kukkiri.weights import default_dir, download, version_of
 

@@ -26,6 +26,7 @@ class RemasterConfig:
     detector_size: str = "seg_medium"
     batch: int = 8
     max_pixels: int | None = None
+    threshold_scale: float = 1.0
     gap: int = 6
     min_length: int = 2
     qp: int = 14
@@ -256,7 +257,7 @@ def _remaster_once(
     n_frames = int(info.get("nb_frames") or 0)
     height = int(info.get("height") or 0)
     if threshold is None:
-        threshold = 0.2 if 0 < height < 720 else 0.35
+        threshold = round((0.2 if 0 < height < 720 else 0.35) * cfg.threshold_scale, 3)
     if progress:
         progress(ProgressEvent(0.0, "preparing", 0, n_frames))
     detector, restorer = _load_models(weights_dir, cfg, threshold, batch)

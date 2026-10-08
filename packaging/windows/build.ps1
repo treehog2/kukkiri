@@ -35,7 +35,7 @@ $idx = @("--index-url", "https://pypi.org/simple", "--extra-index-url", "https:/
          "--extra-index-url", "https://pypi.nvidia.com")
 $pins = @("torch==2.14.0+cu130", "torchvision==0.29.0+cu130", "numpy==2.3.5", "opencv-python-headless==5.0.0.93",
           "rfdetr==1.10.1", "PyNvVideoCodec==2.2.2", "tensorrt-cu13==11.3.0.99", "onnx==1.22.0",
-          "onnxconverter-common==1.16.0", "safetensors==0.8.0", "PySide6-Essentials==6.11.2")
+          "onnxconverter-common==1.16.0", "safetensors==0.8.0", "PySide6-Essentials==6.11.2", "nvidia-ml-py==13.615.71")
 # torch_tensorrt pins tensorrt<11.2 but works with 11.3; --no-deps keeps pip from downgrading it
 $nodeps = @("torch_tensorrt==2.14.0+cu130", "dllist==2.0.0", "psutil==7.2.2")
 & python -m pip wheel --wheel-dir $wh @idx @pins

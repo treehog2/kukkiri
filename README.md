@@ -73,6 +73,9 @@ already uncensored, copies another tool has already processed, or footage with n
 Output keeps the source resolution. `--max-1080p` serves larger sources (4K) at 1080p instead, which is faster and
 gives smaller files.
 
+`--sensitivity high` also detects faint or small mosaics (at the risk of touching things that are not mosaics);
+`--sensitivity low` makes fewer false detections. The default, `normal`, suits most videos.
+
 To restore many videos, pass several files and/or folders (folders are searched recursively) and an output folder:
 
 ```
@@ -102,9 +105,11 @@ kukkiri-gui
 ```
 
 Add videos or whole folders with the buttons or by dropping them on the window, choose the weights folder once, and press Start.
-Files are restored one after another; each row shows its progress and time left, and a finished row opens on
-double-click. Start and Duration apply to files added after they are set, for restoring a section only. Stop ends the
-current file (its partial output is removed) and pauses the rest of the queue.
+Files are restored one after another; each row shows its progress, speed and time left, and a finished row opens on
+double-click. A row's ✂ button restores only a section of that video. Stop ends the current file (its partial output
+is removed) and pauses the rest of the queue. The window comes in English, Korean and Chinese (simplified and
+traditional), shows GPU, CPU and memory use, and **System check** tests the GPU, driver, disk, model files and ffmpeg
+(also `kukkiri check` on the command line).
 
 ## How it works
 

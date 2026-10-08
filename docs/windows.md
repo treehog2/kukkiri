@@ -39,6 +39,9 @@ Later, start kukkiri from the Start menu.
 kukkiri works through a queue. You add videos, press **Start**, and they are restored one after another. Each
 restored video is saved as a new file next to the original; the original is never changed.
 
+The menu at the top right switches the language: English, 한국어, 简体中文 or 繁體中文. The bottom right shows how busy the
+GPU, its memory, the CPU and the RAM are while kukkiri works.
+
 ## Add videos
 
 Click **Add videos…** and pick one or more files, or drag them onto the window. **Add folder…** adds every video in
@@ -57,28 +60,25 @@ To take a video out of the queue, select its row and click **Remove**.
 
 ## Restore only part of a video
 
-To restore only a section, for example to try kukkiri on a short scene first, fill in **Start** and **Duration**
-*before* adding the video. Both take seconds, `mm:ss` or `hh:mm:ss`. Leave Duration empty to restore from Start to
-the end.
-
-![Start and Duration filled in](media/windows/section-fields.png)
-
-The values apply to every video you add while they are set. The **Section** column shows what each row will
-restore.
-
-![A queue with one section](media/windows/section-queued.png)
-
-Clear the two fields again before adding more whole videos.
+To restore only a section of a video, for example to try kukkiri on a short scene first, click **✂** on its row
+and fill in **Start** and **Duration**. Both take seconds, `mm:ss` or `hh:mm:ss`. Leave Duration empty to restore
+from Start to the end; **Whole video** goes back to restoring all of it. The **Section** column shows what each row
+will restore. A row can be changed until it starts.
 
 ## Advanced
 
-**Advanced…** shows three more settings, which kukkiri remembers:
+**Advanced…** shows more settings, which kukkiri remembers:
 
 - **Model:** which kiyo model restores, by default the latest (`kiyo-v4`). An older one (`kiyo-v3`) is there for
   comparison; it is downloaded the first time you use it.
 - **Weights folder:** where the models are kept, by default `%LOCALAPPDATA%\kukkiri\weights\<version>`. Change it
   only if you keep the models somewhere else.
 - **Output folder:** where restored videos go. Empty means next to each original.
+- **Detection sensitivity:** **High** also finds faint or small mosaics, but may touch things that are not mosaics;
+  **Low** makes fewer false detections but may miss some. **Normal** suits most videos.
+- **Limit to 1080p:** restores 4K and other large videos at 1080p, which is much faster and gives smaller files.
+- **Restore even if a video looks uncensored:** skips the check described under Restore, for a video it skipped by
+  mistake.
 
 
 ## Restore
@@ -153,6 +153,10 @@ are not touched. The models and their GPU files stay in `%LOCALAPPDATA%\kukkiri`
 them again. Delete that folder to remove them as well.
 
 ## Problems
+
+**System check** (top right) tests this computer: the graphics card and its driver, GPU memory, free disk space,
+the model files, ffmpeg and whether the one-time GPU preparation is done. Each line says what to do if something is
+wrong.
 
 - **"no NVIDIA GPU found" or "driver … which kukkiri cannot use":** update the NVIDIA driver to 580 or newer from
   [nvidia.com/drivers](https://www.nvidia.com/drivers) and restart.
