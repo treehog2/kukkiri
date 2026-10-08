@@ -10,7 +10,8 @@ $ProgressPreference = "SilentlyContinue"
 
 # pinned inputs (same GPU stack as the Dockerfile)
 $PythonUrl = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip"  # last 3.12 with an embeddable build
-$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-22-13-18/ffmpeg-n8.1.3-win64-gpl-8.1.zip"
+# the newest 8.1.x build: BtbN deletes dated autobuilds after about two weeks (a pinned one 404ed on 2026-10-08)
+$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-win64-gpl-8.1.zip"
 
 $Stage = Join-Path $Out "stage"
 if (Test-Path $Stage) { Remove-Item -Recurse -Force $Stage }
