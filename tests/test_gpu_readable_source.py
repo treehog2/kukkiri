@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from kukkiri.video_io_gpu import gpu_readable_source, repair_source
 
 
@@ -13,10 +15,10 @@ def _format(path: Path) -> str:
     return json.loads(out.stdout)["format"]["format_name"]
 
 
-def _clip(path: Path) -> Path:
+def _clip(path: Path, pix_fmt: str = "yuv420p", codec: str = "libx264") -> Path:
     subprocess.run(
         ["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=64x64:rate=30:duration=2", "-c:v",
-         "libx264", str(path)],
+         codec, "-pix_fmt", pix_fmt, str(path)],
         check=True,
     )
     return path
@@ -43,6 +45,27 @@ def _two_audio_mkv(path: Path) -> Path:
 
 def test_mp4_is_read_as_is(tmp_path):
     src = _clip(tmp_path / "in.mp4")
+    assert gpu_readable_source(src, tmp_path) == src
+
+
+@pytest.mark.parametrize("pix_fmt", ["yuv420p10le", "yuv422p", "yuv444p"])
+def test_h264_beyond_8bit_420_is_reencoded(tmp_path, pix_fmt):
+    out = gpu_readable_source(_clip(tmp_path / "in.mp4", pix_fmt), tmp_path)
+    pix = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=pix_fmt", "-of", "csv=p=0",
+         str(out)],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.name == "source_readable.mp4" and pix.stdout.strip() == "yuv420p"
+
+
+def test_full_range_420_is_read_as_is(tmp_path):
+    src = _clip(tmp_path / "in.mp4", "yuvj420p")
+    assert gpu_readable_source(src, tmp_path) == src
+
+
+def test_10bit_hevc_is_read_as_is(tmp_path):
+    src = _clip(tmp_path / "in.mp4", "yuv420p10le", "libx265")
     assert gpu_readable_source(src, tmp_path) == src
 
 

@@ -20,7 +20,7 @@ _NVC_LOCK = (
 
 
 GPU_READABLE_CONTAINERS = {"mp4", "mov"}
-GPU_READABLE_CODECS = {"h264", "hevc"}
+GPU_READABLE_PIX_FMTS = {"h264": {"yuv420p", "yuvj420p"}, "hevc": {"yuv420p", "yuvj420p", "yuv420p10le"}}
 MUXABLE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
 
@@ -46,8 +46,8 @@ def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
 
 def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     streams = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=codec_type,codec_name", "-of", "json",
-         str(video)],
+        ["ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=codec_type,codec_name,pix_fmt", "-of",
+         "json", str(video)],
         capture_output=True, text=True,
     )
     if streams.returncode != 0:
@@ -57,7 +57,8 @@ def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> P
     for st in j.get("streams", []):
         codecs.setdefault(st.get("codec_type"), st.get("codec_name"))
     container_ok = bool(GPU_READABLE_CONTAINERS & set(j.get("format", {}).get("format_name", "").split(",")))
-    video_ok = codecs.get("video") in GPU_READABLE_CODECS
+    pix_fmt = next((st.get("pix_fmt") for st in j.get("streams", []) if st.get("codec_type") == "video"), None)
+    video_ok = pix_fmt in GPU_READABLE_PIX_FMTS.get(codecs.get("video"), ())
     audio = [st.get("codec_name") for st in j.get("streams", []) if st.get("codec_type") == "audio"]
     audio_ok = all(a in MUXABLE_AUDIO for a in audio)
     if container_ok and video_ok and audio_ok:
@@ -73,7 +74,8 @@ def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> P
     if run.returncode != 0:
         raise FFmpegError(f"could not make {Path(video).name} readable ({run.returncode}): {run.stderr[-500:]}")
     logger.info(
-        f"{Path(video).name} ({j.get('format', {}).get('format_name')}, {codecs.get('video')}/{codecs.get('audio')})"
+        f"{Path(video).name} ({j.get('format', {}).get('format_name')}, {codecs.get('video')} {pix_fmt}"
+        f"/{codecs.get('audio')})"
         f" -> {'remux' if video_ok else 'h264 re-encode'} in {time.time() - t:.1f} s"
     )
     return out
