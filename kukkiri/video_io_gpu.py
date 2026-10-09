@@ -44,6 +44,20 @@ def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     return out
 
 
+def _field_coded(video: Path) -> bool:
+    try:
+        run = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+2", "-count_packets",
+             "-count_frames", "-show_entries", "stream=nb_read_packets,nb_read_frames", "-of", "json", str(video)],
+            capture_output=True, text=True, timeout=30,
+        )
+        st = json.loads(run.stdout)["streams"][0]
+        return int(st["nb_read_packets"]) > 1.5 * int(st["nb_read_frames"])
+    except (subprocess.TimeoutExpired, ValueError, KeyError, IndexError, TypeError) as e:
+        logger.warning(f"{Path(video).name}: field-coding probe failed, assuming frame-coded: {e!r}")
+        return False
+
+
 def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     streams = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=codec_type,codec_name,pix_fmt", "-of",
@@ -59,6 +73,7 @@ def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> P
     container_ok = bool(GPU_READABLE_CONTAINERS & set(j.get("format", {}).get("format_name", "").split(",")))
     pix_fmt = next((st.get("pix_fmt") for st in j.get("streams", []) if st.get("codec_type") == "video"), None)
     video_ok = pix_fmt in GPU_READABLE_PIX_FMTS.get(codecs.get("video"), ())
+    video_ok = video_ok and not (codecs.get("video") == "h264" and _field_coded(video))
     audio = [st.get("codec_name") for st in j.get("streams", []) if st.get("codec_type") == "audio"]
     audio_ok = all(a in MUXABLE_AUDIO for a in audio)
     if container_ok and video_ok and audio_ok:
