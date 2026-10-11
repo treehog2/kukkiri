@@ -3,11 +3,12 @@ import queue
 import subprocess
 import sys
 
+import pytest
 import torch
 
 from kukkiri.detector import Detection
 from kukkiri.mux import exact_frame_times
-from kukkiri.remaster import ENCODE_MAX_SIDE, _detect_loop, _output_size
+from kukkiri.remaster import ENCODE_MAX_SIDE, _detect_loop, _eta_s, _output_size
 from kukkiri.streaming import JobSource, SpanEmitter
 from kukkiri.tracker import FACE_LABEL, GappedTracker
 
@@ -89,3 +90,8 @@ def test_stalled_stream_fails(tmp_path):
     run = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env,
                          timeout=60)
     assert run.stdout.strip() == "stalled", run.stderr[-2000:]
+
+
+def test_eta_ignores_gpu_preparation_before_the_first_frame():
+    assert _eta_s(1001, 10001, 20.0) == pytest.approx(9000 / 50 * 1.05)
+    assert _eta_s(32, 10001, 1.0) is None

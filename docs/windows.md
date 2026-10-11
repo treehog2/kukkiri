@@ -65,6 +65,8 @@ and fill in **Start** and **Duration**. Both take seconds, `mm:ss` or `hh:mm:ss`
 from Start to the end; **Whole video** goes back to restoring all of it. The **Section** column shows what each row
 will restore. A row can be changed until it starts.
 
+![Restoring only part of a video](media/windows/section-dialog.png)
+
 ## Advanced
 
 **Advanced…** shows more settings, which kukkiri remembers:
@@ -107,8 +109,7 @@ row to play the restored video.
 
 Restored videos are named after the original plus `.kukkiri` and the model that restored them: `beach-day.mp4`
 becomes `beach-day.kukkiri-kiyo-v4.mp4`. A section also carries its start and duration, so `party-night.mp4` restored
-from 0:02 for 5 seconds becomes `party-night.kukkiri-kiyo-v4.0-02_5.mp4`. (The screenshot below is from an earlier
-version, before the model was part of the name.)
+from 0:02 for 5 seconds becomes `party-night.kukkiri-kiyo-v4.0-02_5.mp4`.
 
 ![Originals and restored files side by side](media/windows/output-files.png)
 

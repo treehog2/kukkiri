@@ -195,6 +195,12 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
         stats["n_frames"] = fi
 
 
+def _eta_s(done: int, n_frames: int, since_first_s: float) -> float | None:
+    if done <= 32:
+        return None
+    return (n_frames - done) / ((done - 1) / max(since_first_s, 1e-3)) * 1.05
+
+
 def remaster(src: str | Path, dst: str | Path, weights_dir: str | Path, **kwargs) -> RemasterResult:
     try:
         return _remaster_once(src, dst, weights_dir, **kwargs)
@@ -297,6 +303,7 @@ def _remaster_once(
     )
     done = 0
     last = [0.0]
+    first = [0.0]
 
     def publish_live():
         if on_live_file:
@@ -309,12 +316,13 @@ def _remaster_once(
             writer.write(f)
         done += 1
         now = time.time()
+        if done == 1:
+            first[0] = now
         if now - last[0] > 2:
             last[0] = now
             publish_live()
             if progress and n_frames:
-                rate = done / max(now - t2, 1e-3)
-                eta = (n_frames - done) / rate * 1.05 if done > 32 else None
+                eta = _eta_s(done, n_frames, now - first[0])
                 progress(ProgressEvent(100 * done / n_frames, "remaster", done, n_frames, eta))
 
     try:
