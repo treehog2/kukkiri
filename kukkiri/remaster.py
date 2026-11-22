@@ -1,6 +1,7 @@
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import logging
 import os
@@ -35,6 +36,14 @@ class RemasterConfig:
     max_bitrate: int = 50_000_000
     preset: str = "P7"
     cut_tv: float = 0.3
+    ltx: bool = False
+    ltx_min_size: float = 0.09
+    max_fps: float | None = None
+    vr: str | None = None
+    vr_lens: str = "equirect"
+
+
+VR_MAX_BITRATE = 80_000_000
 
 
 @dataclass
@@ -74,17 +83,50 @@ class RemasterResult:
         return asdict(self)
 
 
+LTX_LOW_VRAM_GB = 32
+LTX_MIN_VRAM_GB = 16
+
+
+def _ltx_resident_blocks() -> int | None:
+    import torch
+
+    env = os.environ.get("KUKKIRI_LTX_RESIDENT_BLOCKS")
+    if env:
+        return int(env)
+    gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+    if gb >= LTX_LOW_VRAM_GB:
+        return None
+    keep = max(0, min(48, int(3 * (gb - LTX_MIN_VRAM_GB))))
+    os.environ.setdefault("KUKKIRI_FRAME_BUDGET_GB", "2")
+    logger.info(f"kiyo-ltx low-VRAM mode ({gb:.0f} GB GPU): {keep} of 48 transformer blocks stay on the GPU, the rest "
+                "are streamed from system memory (slower)")
+    return keep
+
+
 def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch: int):
     from kukkiri.detector import CensorDetector, RFDETRSize
     from kukkiri.restorer import VideoRestorer
     from kukkiri.weights import detector_checkpoint, restorer_weights
 
-    detector = CensorDetector(detector_checkpoint(weights_dir), size=RFDETRSize(cfg.detector_size), threshold=threshold)
+    compile_ok = cfg.ltx and importlib.util.find_spec("triton") is not None and os.environ.get("KUKKIRI_LTX_COMPILE", "1") != "0"
+    if compile_ok:
+        from torch._inductor.runtime.cache_dir_utils import default_cache_dir
+
+        cur = os.environ.get("TORCHINDUCTOR_CACHE_DIR")
+        if cur is None or os.path.abspath(cur) == os.path.abspath(default_cache_dir()):
+            os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(Path(weights_dir) / "inductor")
+    det_dir = Path(weights_dir) / "vr" if cfg.vr else weights_dir
+    detector = CensorDetector(detector_checkpoint(det_dir), size=RFDETRSize(cfg.detector_size), threshold=threshold)
     detector.fast = True
     detector.trt = True
     restorer = VideoRestorer(restorer_weights(weights_dir), device="cuda", trt_steps=True, engine_dir=weights_dir)
     restorer.graph_batch = batch
     os.environ.setdefault("KUKKIRI_PRIMARY_BATCH", str(batch))
+    if cfg.ltx:
+        from kukkiri.ltx import LtxRestorer
+
+        restorer.ltx = LtxRestorer(weights_dir, compile=compile_ok, resident_blocks=_ltx_resident_blocks())
+        restorer.ltx_min_size = cfg.ltx_min_size
     return detector, restorer
 
 
@@ -113,7 +155,8 @@ def _cut_flags(batch, prev, cut_tv: float):
     return (tv > cut_tv).tolist(), h[-1]
 
 
-def _produce_jobs(detector, frames, source, gap: int, min_length: int, stats: dict, cut_tv: float) -> None:
+def _produce_jobs(detector, frames, source, gap: int, min_length: int, stats: dict, cut_tv: float, vr=None,
+                  fisheye: bool = False) -> None:
     from kukkiri.tracker import GappedTracker
     from kukkiri.streaming import SpanEmitter
 
@@ -135,7 +178,7 @@ def _produce_jobs(detector, frames, source, gap: int, min_length: int, stats: di
     try:
         with torch.cuda.stream(torch.cuda.Stream()):
             tk = GappedTracker(max_gap=gap, min_length=min_length)
-            _detect_loop(detector, bq, tk, SpanEmitter(min_length=min_length), source, stats, cut_tv)
+            _detect_loop(detector, bq, tk, SpanEmitter(min_length=min_length), source, stats, cut_tv, vr, fisheye)
     except BaseException as e:
         stats.setdefault("error", e)
     finally:
@@ -153,14 +196,27 @@ def _track_span(tr) -> tuple[int, int, float]:
     return tr.start, tr.end, float(area)
 
 
-def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
+def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float, vr=None, fisheye: bool = False) -> None:
     from kukkiri.tracker import FACE_LABEL, is_face_track
 
     fi, prev_hist = 0, None
     stats.setdefault("n_cuts", 0)
 
+    def place(tr):
+        if not vr:
+            return
+        from kukkiri.vr import eye_bounds, eye_size, fisheye_share
+
+        w = source_w[0]
+        if not hasattr(tr, "bounds"):
+            tr.bounds = eye_bounds(tr.boxes[min(tr.boxes)], w)
+        tr.fisheye = eye_size(w) if fisheye and fisheye_share(tr) > 0.5 else None
+
+    source_w = [0]
+
     def close(tracks):
         for tr in tracks:
+            place(tr)
             if is_face_track(tr):
                 stats["n_face_tracks"] = stats.get("n_face_tracks", 0) + 1
                 continue
@@ -175,7 +231,14 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
             if batch is None or fi >= len(source.pending):
                 break
             cuts, prev_hist = _cut_flags(batch, prev_hist, cut_tv)
-            for cut, dets in zip(cuts, detector.detect_frames(batch, batch_size=32)):
+            if vr:
+                from kukkiri.vr import detect_eyes
+
+                source_w[0] = batch[0].shape[1]
+                per_frame = detect_eyes(detector, batch, batch_size=32, fisheye=fisheye)
+            else:
+                per_frame = detector.detect_frames(batch, batch_size=32)
+            for cut, dets in zip(cuts, per_frame):
                 dets = [d for d in dets if d.label in (MOSAIC_LABEL, FACE_LABEL)]
                 if fi >= len(source.pending):
                     break
@@ -185,6 +248,7 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float) -> None:
                 stats["n_detections"] += len(dets)
                 close(tk.push(fi, dets))
                 for tr in tk.active:
+                    place(tr)
                     for job in em.poll(tr, tk.confirmed[tr.track_id]):
                         if not is_face_track(tr):
                             source.put(job)
@@ -237,6 +301,7 @@ def _remaster_once(
     original: str | Path | None = None,
 ) -> RemasterResult:
     from kukkiri.mux import LiveMuxer
+    from kukkiri.geometry import CLIP
     from kukkiri.streaming import (
         CANVAS_SIZE,
         JobSource,
@@ -262,19 +327,37 @@ def _remaster_once(
     fps = float(info.get("fps") or 30.0)
     n_frames = int(info.get("nb_frames") or 0)
     height = int(info.get("height") or 0)
+    if threshold is None and cfg.vr:
+        from kukkiri.vr import THRESHOLD
+
+        threshold = round(THRESHOLD * cfg.threshold_scale, 3)
     if threshold is None:
         threshold = round((0.2 if 0 < height < 720 else 0.35) * cfg.threshold_scale, 3)
+    if cfg.vr:
+        max_bitrate = max(max_bitrate, VR_MAX_BITRATE)
     if progress:
         progress(ProgressEvent(0.0, "preparing", 0, n_frames))
     detector, restorer = _load_models(weights_dir, cfg, threshold, batch)
     logger.info(
         f"remaster {src.name}: {n_frames} frames @ {fps:.3f} fps, {height}p, thr {threshold}, batch {batch}"
     )
+    width = int(info.get("width") or 0)
+    if not cfg.vr and height >= 960 and width == 2 * height:
+        logger.warning(f"{src.name} looks like a side-by-side VR video: restore it with --vr sbs for VR's small "
+                       "mosaics, adding --vr-lens fisheye for studios that pixelate the fisheye image (in the app: "
+                       "Advanced, VR video)")
 
     t2 = time.time()
-    scale_to = _output_size(height, int(info.get("width") or 0), cfg.max_pixels)
+    scale_to = None if cfg.vr else _output_size(height, int(info.get("width") or 0), cfg.max_pixels)
+    max_fps = cfg.max_fps if cfg.max_fps is not None else (30.0 if cfg.ltx else 0.0)
+    stride = 1
+    while max_fps and fps / stride > max_fps * 1.05:
+        stride += 1
+    if stride > 1:
+        logger.info(f"{fps:.3f} fps source: restoring 1 frame in {stride} ({fps / stride:.3f} fps out)")
+        fps, n_frames = fps / stride, -(-n_frames // stride)
     try:
-        frames = SharedFrameStore(src, scale_to=scale_to)
+        frames = SharedFrameStore(src, scale_to=scale_to, stride=stride)
     except Exception as e:
         import PyNvVideoCodec as nvc
 
@@ -284,7 +367,7 @@ def _remaster_once(
         logger.warning(f"{src.name}: GPU decoder cannot open the source: {' | '.join(str(e).strip().splitlines()[:3])}")
         raise SourceTruncated(0, n_frames, fps) from e
     n_frames = n_frames or len(frames)
-    repeats = frame_repeats(src, fps, n_frames, float(info.get("duration") or 0))
+    repeats = frame_repeats(src, fps, n_frames, float(info.get("duration") or 0)) if stride == 1 else None
     n_out = sum(repeats) if repeats else n_frames
     if repeats:
         logger.info(f"variable frame rate: {n_frames} frames over {info.get('duration')} s -> {n_out} at {fps:.3f} fps")
@@ -329,10 +412,12 @@ def _remaster_once(
         if detector.trt and not hasattr(detector, "_trt_ctx"):
             detector._trt_init()
         restorer.warm(CANVAS_SIZE)
+        if getattr(restorer, "ltx", None) is not None:
+            restorer.ltx.warm(CLIP)
         pstats = {"n_frames": 0, "n_detections": 0, "n_tracks": 0, "tracks": []}
         source = JobSource(len(frames), maxsize=256)
         producer = threading.Thread(
-            target=_produce_jobs, args=(detector, frames, source, gap, min_length, pstats, cfg.cut_tv), daemon=True
+            target=_produce_jobs, args=(detector, frames, source, gap, min_length, pstats, cfg.cut_tv, cfg.vr, cfg.vr == "sbs" and cfg.vr_lens == "fisheye"), daemon=True
         )
         producer.start()
         touched = restore_stream(source, frames, restorer, sink)

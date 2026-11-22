@@ -11,7 +11,7 @@ from PySide6.QtCore import QLocale, QProcess, QProcessEnvironment, QSettings, Qt
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, _seconds, collect_videos
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
-from kukkiri.weights import MODELS, default_dir, missing, version_of
+from kukkiri.weights import MODELS, default_dir, download_size, is_ltx, missing, version_of
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -312,17 +312,28 @@ class MainWindow(QMainWindow):
         self.sensitivity.setCurrentIndex(max(0, self.sensitivity.findData(self.settings.value("sensitivity", "normal"))))
         self.sensitivity.currentIndexChanged.connect(
             lambda: self.settings.setValue("sensitivity", self.sensitivity.currentData()))
+        self.vr = QComboBox()
+        for key, value in (("No (flat video)", ""), ("Side-by-side 180°", "sbs"),
+                           ("Side-by-side 180°, fisheye mosaic (blocks bend into fans near the bottom)", "sbs-fisheye")):
+            self.vr.addItem(tr(key), value)
+            self._t(lambda text, i=self.vr.count() - 1: self.vr.setItemText(i, text), key)
+        self.vr.setCurrentIndex(max(0, self.vr.findData(self.settings.value("vr", ""))))
+        self.vr.currentIndexChanged.connect(lambda: self.settings.setValue("vr", self.vr.currentData()))
         self.max_1080p = QCheckBox()
         self.skip_check = QCheckBox()
-        for box, key in ((self.max_1080p, "max_1080p"), (self.skip_check, "skip_check")):
+        self.keep_fps = QCheckBox()
+        for box, key in ((self.max_1080p, "max_1080p"), (self.skip_check, "skip_check"), (self.keep_fps, "keep_fps")):
             box.setChecked(self.settings.value(key, "false") == "true")
             box.toggled.connect(lambda on, k=key: self.settings.setValue(k, "true" if on else "false"))
         self._t(self.max_1080p.setText, "Limit to 1080p (faster for 4K videos)")
         self._t(self.skip_check.setText, "Restore even if a video looks uncensored")
+        self._t(self.keep_fps.setText, "Keep 60 fps videos at their full frame rate (kiyo-ltx, about twice as slow)")
         form = QFormLayout()
         for key, field in (("Model", self.model), ("Weights folder", self._with_browse(self.weights, "weights")),
                            ("Output folder", self._with_browse(self.outdir, "outdir")),
-                           ("Detection sensitivity", self.sensitivity), ("", self.max_1080p), ("", self.skip_check)):
+                           ("Detection sensitivity", self.sensitivity), ("VR video", self.vr), ("", self.max_1080p),
+                           ("", self.skip_check),
+                           ("", self.keep_fps)):
             label = QLabel()
             if key:
                 self._t(label.setText, key)
@@ -415,6 +426,9 @@ class MainWindow(QMainWindow):
             setter(tr(key))
         self.table.setHorizontalHeaderLabels([tr(c) if c else "" for c in COLS])
         self.model.setItemText(0, f"{MODELS[0]} ({tr('latest')})")
+        for i, m in enumerate(MODELS):
+            if is_ltx(version_of(m)):
+                self.model.setItemText(i, f"{m} ({tr('best quality, needs a 16 GB GPU')})")
         for row, job in enumerate(self.jobs):
             self.table.item(row, _SECTION).setText(_section_text(job))
             self.table.item(row, _STATUS).setText(tr(job.status, **(job.status_args or {})))
@@ -533,8 +547,8 @@ class MainWindow(QMainWindow):
     def _start_queue(self) -> None:
         weights = Path(self.weights.text())
         if missing(weights, self._version()):
-            msg = tr("kukkiri needs the {model} model weights (about 240 MB). Download them now into\n{weights}?",
-                     model=self.model.currentData(), weights=weights)
+            msg = tr("kukkiri needs the {model} model weights (about {size}). Download them now into\n{weights}?",
+                     model=self.model.currentData(), weights=weights, size=download_size(self._version()))
             if QMessageBox.question(self, "kukkiri", msg) != QMessageBox.StandardButton.Yes:
                 return
         self.run_btn.setEnabled(False)
@@ -567,6 +581,10 @@ class MainWindow(QMainWindow):
             args.append("--max-1080p")
         if self.skip_check.isChecked():
             args.append("--skip-check")
+        if self.keep_fps.isChecked():
+            args.append("--keep-fps")
+        if self.vr.currentData():
+            args += ["--vr", "sbs"] + (["--vr-lens", "fisheye"] if self.vr.currentData() == "sbs-fisheye" else [])
         if job.start:
             args += ["--start", job.start]
         if job.duration:

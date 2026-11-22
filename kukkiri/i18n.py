@@ -29,7 +29,21 @@ _STRINGS = {
     "Output folder": ("출력 폴더", "输出文件夹", "輸出資料夾"),
     "next to each input": ("각 원본 파일 옆", "与原视频相同位置", "與原影片相同位置"),
     "latest": ("최신", "最新", "最新"),
+    "best quality, needs a 16 GB GPU": ("최고 품질, 16 GB GPU 필요", "画质最佳，需要 16 GB 显存的 GPU", "畫質最佳，需要 16 GB 顯示記憶體的 GPU"),
+    "Keep 60 fps videos at their full frame rate (kiyo-ltx, about twice as slow)": (
+        "60fps 동영상을 원래 프레임 속도로 유지 (kiyo-ltx, 약 2배 느림)",
+        "60 fps 视频保持原帧率（kiyo-ltx，约慢一倍）",
+        "60 fps 影片保持原影格率（kiyo-ltx，約慢一倍）",
+    ),
     "Detection sensitivity": ("감지 민감도", "检测灵敏度", "偵測靈敏度"),
+    "VR video": ("VR 영상", "VR 视频", "VR 影片"),
+    "No (flat video)": ("아니요 (일반 영상)", "否（普通视频）", "否（一般影片）"),
+    "Side-by-side 180°": ("좌우 분할 180°", "左右并排 180°", "左右並排 180°"),
+    "Side-by-side 180°, fisheye mosaic (blocks bend into fans near the bottom)": (
+        "좌우 분할 180°, 어안 모자이크 (아래쪽에서 블록이 부채꼴로 휘어짐)",
+        "左右并排 180°，鱼眼马赛克（底部的色块弯成扇形）",
+        "左右並排 180°，魚眼馬賽克（底部的色塊彎成扇形）",
+    ),
     "Normal": ("보통", "普通", "普通"),
     "High (also finds faint or small mosaics)": (
         "높음 (흐리거나 작은 모자이크도 감지)", "高（也能检测模糊或细小的马赛克）", "高（也能偵測模糊或細小的馬賽克）"),
@@ -80,10 +94,10 @@ _STRINGS = {
     ),
     "Stopped.": ("중지됨.", "已停止。", "已停止。"),
     "Queue finished.": ("대기열 완료.", "队列已完成。", "佇列已完成。"),
-    "kukkiri needs the {model} model weights (about 240 MB). Download them now into\n{weights}?": (
-        "kukkiri에 {model} 모델 파일(약 240 MB)이 필요합니다. 지금 다음 위치로 다운로드할까요?\n{weights}",
-        "kukkiri 需要 {model} 模型文件（约 240 MB）。现在下载到以下位置吗？\n{weights}",
-        "kukkiri 需要 {model} 模型檔案（約 240 MB）。現在下載到以下位置嗎？\n{weights}",
+    "kukkiri needs the {model} model weights (about {size}). Download them now into\n{weights}?": (
+        "kukkiri에 {model} 모델 파일(약 {size})이 필요합니다. 지금 다음 위치로 다운로드할까요?\n{weights}",
+        "kukkiri 需要 {model} 模型文件（约 {size}）。现在下载到以下位置吗？\n{weights}",
+        "kukkiri 需要 {model} 模型檔案（約 {size}）。現在下載到以下位置嗎？\n{weights}",
     ),
     "A video is still being restored. Stop it and quit?": (
         "아직 동영상을 복원하고 있습니다. 중지하고 종료할까요?",
@@ -124,10 +138,10 @@ _STRINGS = {
         "{path} 可用 {free} GB：請先釋放空間",
     ),
     "downloaded and verified": ("다운로드 및 확인 완료", "已下载并验证", "已下載並驗證"),
-    "not downloaded yet: the first restore downloads them (about 240 MB)": (
-        "아직 다운로드하지 않음: 첫 복원 시 다운로드됩니다 (약 240 MB)",
-        "尚未下载：首次修复时会自动下载（约 240 MB）",
-        "尚未下載：首次修復時會自動下載（約 240 MB）",
+    "not downloaded yet: the first restore downloads them (about {size})": (
+        "아직 다운로드하지 않음: 첫 복원 시 다운로드됩니다 (약 {size})",
+        "尚未下载：首次修复时会自动下载（约 {size}）",
+        "尚未下載：首次修復時會自動下載（約 {size}）",
     ),
     "damaged: delete {path} and restore again to download them anew": (
         "손상됨: {path} 폴더를 삭제한 뒤 다시 복원하면 새로 다운로드됩니다",

@@ -37,12 +37,13 @@ docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" kukkiri \
     restore /data/input.mp4 -o /data/restored.mp4 --weights /weights
 ```
 
-The image pins the tested versions of the main dependencies. Keep the weights directory mounted writable so the TensorRT
+The image pins the tested versions of the main dependencies, kiyo-ltx's included. Keep the weights directory mounted writable so the TensorRT
 engines built on the first run are reused.
 
 ## Weights
 
-The weights are licensed under the same terms as the code (GPL-3.0-only with the NVIDIA exception below).
+The kiyo weights are licensed under the same terms as the code (GPL-3.0-only with the NVIDIA exception below); the
+kiyo-ltx weights are under the LTX-2.x Community License (see kiyo-ltx below).
 They are published at [treehog/kukkiri](https://huggingface.co/treehog/kukkiri) on Hugging Face, one folder per version.
 
 The first restore downloads them: the detector (RF-DETR seg-medium, 141 MB, plus its 65 MB ONNX export) and the
@@ -55,6 +56,52 @@ kukkiri download-weights [folder]
 ```
 
 TensorRT engines are built into the same folder on the first run, which takes a few minutes and is cached afterwards.
+
+## kiyo-ltx
+
+`kiyo-ltx-v1` restores with Lightricks' [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) video diffusion model,
+fine-tuned to restore mosaics, for clearer detail on larger mosaics; small ones still go to kiyo. It needs:
+
+- a GPU with at least **16 GB** of memory. Below 32 GB it keeps part of the model in system memory and streams it
+  to the GPU as needed: the same result, but slower (about 1.5x on a 24 GB card, 1.75x on 16 GB, in our tests).
+  It stops with a message on less than 15 GB.
+- a **15 GB** download on first use (the folder `ltx-v1/` on Hugging Face)
+- a few minutes on the first run on a machine, to build its GPU kernels (cached in the weights folder afterwards)
+
+```
+kukkiri restore input.mp4 --model kiyo-ltx-v1
+```
+
+Videos above 30 fps are restored at 30 fps by default (59.94 becomes 29.97), which halves the work; `--keep-fps` keeps
+the full frame rate at about twice the time. The Windows app and the Docker image include everything it needs. With
+pip, also install its packages:
+
+```
+pip install ".[ltx]"
+pip install --no-deps --index-url https://download.pytorch.org/whl/cu130 torchaudio==2.11.0
+pip install --no-deps "ltx-core @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-core"
+pip install --no-deps "ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-pipelines"
+```
+
+The kiyo-ltx weights are a derivative of LTX-2.x and are licensed under the **LTX-2.x Community License**, not the GPL
+(see `ltx-v1/LICENSE-LTX-2.x.txt` and `ltx-v1/NOTICE.md` on Hugging Face). That licence includes use restrictions, and
+it asks that content made with the model be disclosed as machine-generated wherever it is published.
+
+## VR
+
+Side-by-side 180° VR videos (two square eyes next to each other) are restored with `--vr`, with any model:
+
+```
+kukkiri restore input.mp4 --model kiyo-ltx-v1 --vr sbs
+kukkiri restore input.mp4 --model kiyo-ltx-v1 --vr sbs --vr-lens fisheye
+```
+
+Each eye is searched at its full resolution with a detector trained on VR footage (downloaded on first use into the
+weights folder's `vr/` subfolder, about 210 MB), and every restored area stays inside its own eye. Some studios pixelate
+the camera's fisheye image before converting it: their mosaic blocks bend into fans towards the bottom of each eye.
+For those add `--vr-lens fisheye`, which restores each area in the eye's fisheye view and maps it back. VR is encoded at up
+to 80 Mbit/s and ignores `--max-1080p`. In the app: Advanced → VR video. VR with kiyo-ltx needs a GPU with 32 GB
+(two 4K eyes do not fit next to the model on smaller cards yet); on smaller cards restore VR with kiyo-v4.
 
 ## Usage
 
@@ -133,7 +180,8 @@ Copyright (c) 2026 kukkiri authors. The code is licensed under the GNU General P
 (`LICENSE`); the vendored BasicVSR++ code keeps its Apache-2.0 license (`licenses/APACHE-2.0.txt`). Third-party
 components and their licenses are listed in `NOTICE.md`. The model weights are released under the same license.
 `LICENSE-EXCEPTION.md` grants an additional permission to combine kukkiri with NVIDIA's CUDA, TensorRT and Video
-Codec SDK libraries. The kukkiri name and logo are not covered by the license; see `CONTRIBUTING.md`.
+Codec SDK libraries. The kiyo-ltx weights are not GPL: they are a derivative of Lightricks' LTX-2.x, under the LTX-2.x
+Community License. The kukkiri name and logo are not covered by the license; see `CONTRIBUTING.md`.
 
 ## Acknowledgements
 
@@ -141,3 +189,4 @@ Codec SDK libraries. The kukkiri name and logo are not covered by the license; s
 - [BasicVSR++](https://arxiv.org/abs/2104.13371) (Chan et al., CVPR 2022), via OpenMMLab's
   [MMagic](https://github.com/open-mmlab/mmagic): the restoration network
 - Roboflow's [RF-DETR](https://github.com/roboflow/rf-detr): the detector
+- Lightricks' [LTX-2](https://github.com/Lightricks/LTX-2): the video diffusion model behind kiyo-ltx

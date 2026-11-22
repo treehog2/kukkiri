@@ -12,6 +12,8 @@ from kukkiri.weights import MODELS
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".m4v", ".webm", ".flv"}
 SENSITIVITY = {"normal": 1.0, "high": 0.6, "low": 1.4}
+LTX_MIN_VRAM_GB = 15
+LTX_VR_MIN_VRAM_GB = 30
 OUTPUT_TAG = ".kukkiri"
 
 
@@ -84,6 +86,21 @@ def _restore(args) -> int:
         print(f"error: {e}", file=sys.stderr)
         return 1
     args.model = f"kiyo-{version}"
+    from kukkiri.weights import is_ltx
+
+    if is_ltx(version):
+        import torch
+
+        gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+        if gb < LTX_MIN_VRAM_GB:
+            print(f"error: {args.model} needs a GPU with at least {LTX_MIN_VRAM_GB} GB of memory ({torch.cuda.get_device_name()}"
+                  f" has {gb:.0f} GB); use {MODELS[0]} instead", file=sys.stderr)
+            return 1
+        if getattr(args, "vr", None) and gb < LTX_VR_MIN_VRAM_GB:
+            print(f"error: VR with {args.model} needs a GPU with at least {LTX_VR_MIN_VRAM_GB} GB of memory "
+                  f"({torch.cuda.get_device_name()} has {gb:.0f} GB: two 4K eyes do not fit next to the model yet); "
+                  f"restore VR with {MODELS[0]} instead", file=sys.stderr)
+            return 1
     weights = Path(args.weights) if args.weights else default_dir(version)
     if missing(weights, version):
         print(f"downloading the {args.model} model weights into {weights}", file=sys.stderr)
@@ -93,6 +110,16 @@ def _restore(args) -> int:
             print(f"error: could not download the weights: {e}", file=sys.stderr)
             return 1
     args.weights = str(weights)
+    if getattr(args, "vr", None):
+        from kukkiri.weights import VR_VERSION, vr_dir, vr_missing
+
+        if vr_missing(weights):
+            print(f"downloading the VR detector into {vr_dir(weights)}", file=sys.stderr)
+            try:
+                download(vr_dir(weights), log=lambda m: print(m, file=sys.stderr), version=VR_VERSION)
+            except Exception as e:
+                print(f"error: could not download the VR detector: {e}", file=sys.stderr)
+                return 1
     videos = collect_videos(args.input)
     if not videos:
         print("error: no videos found", file=sys.stderr)
@@ -182,11 +209,14 @@ def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
 
     from kukkiri.remaster import RemasterConfig
 
-    from kukkiri.weights import detector_size, version_of
+    from kukkiri.weights import detector_size, is_ltx, version_of
 
-    cfg = RemasterConfig(detector_size=detector_size(version_of(args.model)),
+    version = version_of(args.model)
+    cfg = RemasterConfig(detector_size=detector_size(version),
                          max_pixels=1920 * 1088 if args.max_1080p else None,
-                         threshold_scale=SENSITIVITY[args.sensitivity])
+                         threshold_scale=SENSITIVITY[args.sensitivity],
+                         ltx=is_ltx(version), max_fps=0.0 if args.keep_fps else None, vr=getattr(args, "vr", None),
+                         vr_lens=getattr(args, "vr_lens", "equirect"))
     existed = Path(dst).exists()
     try:
         r = remaster(src, dst, weights, config=cfg, threshold=args.threshold, ffmpeg=args.ffmpeg, progress=progress)
@@ -207,7 +237,7 @@ def _check(args) -> int:
     import shutil
     import subprocess
 
-    from kukkiri.weights import default_dir, missing, verify, version_of
+    from kukkiri.weights import default_dir, download_size, missing, verify, version_of
 
     def emit(item, status, detail, item_args=None, **kw):
         print(json.dumps({"item": item, "item_args": item_args or {}, "status": status, "detail": detail, "args": kw},
@@ -254,8 +284,8 @@ def _check(args) -> int:
          "{free} GB free on {path}: free some space before restoring" if free < 5 else "{free} GB free on {path}",
          free=f"{free:.0f}", path=str(where))
     if missing(weights, version):
-        emit("Model files ({model})", "info", "not downloaded yet: the first restore downloads them (about 240 MB)",
-             {"model": model})
+        emit("Model files ({model})", "info", "not downloaded yet: the first restore downloads them (about {size})",
+             {"model": model}, size=download_size(version))
     elif verify(weights, version):
         emit("Model files ({model})", "fail", "damaged: delete {path} and restore again to download them anew",
              {"model": model}, path=str(weights))
@@ -294,6 +324,14 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--duration", help="restore only this long (seconds, mm:ss or hh:mm:ss)")
     r.add_argument("--skip-check", action="store_true", help="restore even if the input looks uncensored")
     r.add_argument("--max-1080p", action="store_true", help="serve sources above 1080p at 1080p (faster, smaller)")
+    r.add_argument("--keep-fps", action="store_true", help="kiyo-ltx: keep sources above 30 fps at their full frame "
+                   "rate (about twice as slow; by default they are restored at 30 fps)")
+    r.add_argument("--vr", choices=["sbs"], help="VR180 video layout: sbs = side-by-side eyes; the VR detector is "
+                   "downloaded on first use")
+    r.add_argument("--vr-lens", choices=["equirect", "fisheye"], default="equirect",
+                   help="with --vr, the image the studio pixelated: equirect (default), or fisheye for studios whose "
+                   "mosaic was pixelated in the camera's fisheye image (its blocks bend into fans near the bottom of "
+                   "each eye)")
     r.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
     r.add_argument("-v", "--verbose", action="store_true")
     d = sub.add_parser("download-weights", help="download and verify the model weights")
@@ -319,4 +357,16 @@ def main(argv: list[str] | None = None) -> None:
             sys.exit(1)
         sys.exit(0)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(name)s: %(message)s")
-    sys.exit(_restore(args))
+    try:
+        rc = _restore(args)
+    except (SystemExit, Exception, KeyboardInterrupt) as e:
+        if isinstance(e, SystemExit):
+            raise
+        import os
+        import traceback
+
+        traceback.print_exc()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(130 if isinstance(e, KeyboardInterrupt) else 1)
+    sys.exit(rc)

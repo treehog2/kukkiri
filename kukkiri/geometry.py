@@ -23,6 +23,8 @@ class ClipCanvas:
     sizes: list[tuple[int, int]]
     pads: list[tuple[int, int]]
     crops: np.ndarray
+    fish: list | None = None
+    eye: int = 0
 
 
 def mosaic_block(frame_h: int) -> int:
@@ -31,14 +33,15 @@ def mosaic_block(frame_h: int) -> int:
 
 def frame_window(track, i: int, frame_hw: tuple[int, int], canvas: int) -> Box:
     fh, fw = frame_hw
+    lo, hi = getattr(track, "bounds", None) or (0, fw)
     hist = [track.boxes[j] for j in range(max(track.start, i - LOOKBACK), i + 1) if j in track.boxes]
     big = max(max(b[2] - b[0], b[3] - b[1]) for b in hist)
-    side = int(min(max(big + 2 * MARGIN_BLOCKS * mosaic_block(fh), canvas), max(fh, fw)))
-    sx, sy = min(side, fw), min(side, fh)
+    side = int(min(max(big + 2 * MARGIN_BLOCKS * mosaic_block(fh), canvas), max(fh, hi - lo)))
+    sx, sy = min(side, hi - lo), min(side, fh)
     near = hist[-SMOOTH:]
     cx = sum((b[0] + b[2]) / 2 for b in near) / len(near)
     cy = sum((b[1] + b[3]) / 2 for b in near) / len(near)
-    x0 = min(max(int(round(cx - sx / 2)), 0), fw - sx)
+    x0 = min(max(int(round(cx - sx / 2)), lo), hi - sx)
     y0 = min(max(int(round(cy - sy / 2)), 0), fh - sy)
     return (x0, y0, x0 + sx, y0 + sy)
 
@@ -68,15 +71,55 @@ def build_clip_canvas(track, frames_idx: list[int], frames, size: int) -> ClipCa
 
 
 def build_clip_canvas_gpu(track, frames_idx: list[int], frames, size: int) -> ClipCanvas:
+    hw = getattr(frames, "hw", None) or tuple(frames[0].shape[:2])
+    rects, s = _windows_and_scale(track, frames_idx, hw, size)
+    return _canvas_gpu(frames_idx, frames, size, rects, s, getattr(track, "fisheye", None))
+
+
+def clip_window(track, frames_idx: list[int], frame_hw: tuple[int, int]) -> Box:
+    fh, fw = frame_hw
+    lo, hi = getattr(track, "bounds", None) or (0, fw)
+    boxes = [track.boxes[i] for i in frames_idx if i in track.boxes] or [track.boxes[max(track.boxes)]]
+    x0, y0 = min(b[0] for b in boxes), min(b[1] for b in boxes)
+    x1, y1 = max(b[2] for b in boxes), max(b[3] for b in boxes)
+    side = max(x1 - x0, y1 - y0) + 2 * MARGIN_BLOCKS * mosaic_block(fh)
+    sx, sy = min(side, hi - lo), min(side, fh)
+    cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+    wx = min(max(int(round(cx - sx / 2)), lo), hi - sx)
+    wy = min(max(int(round(cy - sy / 2)), 0), fh - sy)
+    return (wx, wy, wx + sx, wy + sy)
+
+
+def build_fixed_canvas_gpu(track, frames_idx: list[int], frames, size: int) -> ClipCanvas:
+    hw = getattr(frames, "hw", None) or tuple(frames[0].shape[:2])
+    rect = clip_window(track, frames_idx, hw)
+    s = size / max(rect[2] - rect[0], rect[3] - rect[1])
+    return _canvas_gpu(frames_idx, frames, size, [rect] * len(frames_idx), s, getattr(track, "fisheye", None))
+
+
+def _canvas_gpu(frames_idx: list[int], frames, size: int, rects: list[Box], s: float, fisheye: int | None = None):
     import torch
     import torch.nn.functional as F
 
-    hw = getattr(frames, "hw", None) or tuple(frames[0].shape[:2])
-    rects, s = _windows_and_scale(track, frames_idx, hw, size)
+    if fisheye:
+        from kukkiri.vr import to_canvas
+
+        crops, boxes = [], []
+        for i, rect in zip(frames_idx, rects):
+            f = frames[i]
+            f = f if isinstance(f, torch.Tensor) else torch.from_numpy(np.ascontiguousarray(f)).cuda()
+            c, box = to_canvas(f, rect, size, fisheye)
+            crops.append(c)
+            boxes.append(box)
+        n = len(rects)
+        return ClipCanvas(list(frames_idx), rects, (s, s), [(size, size)] * n, [(0, 0)] * n, torch.stack(crops), boxes,
+                          fisheye)
     sizes, pads, crops = [], [], []
     for i, (x0, y0, x1, y1) in zip(frames_idx, rects):
         (th, tw), (top, left) = _fit((x0, y0, x1, y1), s, size)
-        crop = frames[i][y0:y1, x0:x1].permute(2, 0, 1)[None].float()
+        f = frames[i]
+        f = f if isinstance(f, torch.Tensor) else torch.from_numpy(np.ascontiguousarray(f)).cuda()
+        crop = f[y0:y1, x0:x1].permute(2, 0, 1)[None].float()
         if s < 1:
             crop = F.interpolate(crop, size=(th, tw), mode="area")
         else:

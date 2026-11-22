@@ -12,6 +12,7 @@ from kukkiri.geometry import (
     blend_mask,
     build_clip_canvas,
     build_clip_canvas_gpu,
+    build_fixed_canvas_gpu,
     seam_weights,
     uncanvas_frame,
 )
@@ -63,15 +64,31 @@ def _accumulate_job_gpu(track: Track, sp, wts, cc, restored, scale, acc: dict) -
         top, left = cc.pads[k]
         th, tw = cc.sizes[k]
         x0, y0, x1, y1 = cc.rects[k]
-        crop = restored[k, top * scale : (top + th) * scale, left * scale : (left + tw) * scale]
-        crop = crop.permute(2, 0, 1)[None].float()
-        crop = F.interpolate(crop, size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False, antialias=False)[0]
-        key = (track.track_id, fi)
-        if key in acc:
-            s, tot, rect = acc[key]
-            acc[key] = (s + w * crop, tot + w, rect)
+        if cc.fish:
+            from kukkiri.vr import from_canvas
+
+            crop = from_canvas(restored[k], cc.rects[k], cc.fish[k], cc.eye)
         else:
-            acc[key] = (w * crop, w, cc.rects[k])
+            crop = restored[k, top * scale : (top + th) * scale, left * scale : (left + tw) * scale]
+            crop = crop.permute(2, 0, 1)[None].float()
+            crop = F.interpolate(crop, size=(y1 - y0, x1 - x0), mode="bilinear", align_corners=False, antialias=False)[0]
+        key = (track.track_id, fi)
+        rect = cc.rects[k]
+        if key not in acc:
+            acc[key] = (w * crop, w, rect)
+            continue
+        s, tot, old = acc[key]
+        if old == rect:
+            acc[key] = (s + w * crop, tot + w, old)
+            continue
+        u = (min(old[0], rect[0]), min(old[1], rect[1]), max(old[2], rect[2]), max(old[3], rect[3]))
+        s2 = crop.new_zeros((3, u[3] - u[1], u[2] - u[0]))
+        t2 = crop.new_zeros((1, u[3] - u[1], u[2] - u[0]))
+        for r, add, wt in ((old, s, tot), (rect, w * crop, w)):
+            ys, xs = slice(r[1] - u[1], r[3] - u[1]), slice(r[0] - u[0], r[2] - u[0])
+            s2[:, ys, xs] += add
+            t2[:, ys, xs] += wt
+        acc[key] = (s2, t2, u)
 
 
 def _blend_frame_gpu(fi: int, tracks: "list[Track]", acc: dict, frame: np.ndarray, frame_hw) -> bool:
@@ -83,9 +100,13 @@ def _blend_frame_gpu(fi: int, tracks: "list[Track]", acc: dict, frame: np.ndarra
         if key not in acc:
             continue
         s, tot, rect = acc.pop(key)
-        crop = s / max(tot, 1e-6)
         x0, y0, x1, y1 = rect
-        m = torch.from_numpy(blend_mask(tr.masks.get(fi), rect, frame_hw)).to(crop.device).permute(2, 0, 1)
+        m = torch.from_numpy(blend_mask(tr.masks.get(fi), rect, frame_hw)).to(s.device).permute(2, 0, 1)
+        if isinstance(tot, torch.Tensor):
+            crop = s / tot.clamp_min(1e-6)
+            m = m * (tot > 0)
+        else:
+            crop = s / max(tot, 1e-6)
         if isinstance(frame, torch.Tensor):
             region = frame[y0:y1, x0:x1].permute(2, 0, 1).float()
             frame[y0:y1, x0:x1] = (region * (1.0 - m) + crop * m).round().clamp(0, 255).to(torch.uint8).permute(1, 2, 0)
@@ -293,18 +314,36 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
         2 * CLIP, int(float(os.environ.get("KUKKIRI_FRAME_BUDGET_GB", "6")) * 2**30 // (frame_hw[0] * frame_hw[1] * 3))
     )
 
+    ltx = getattr(restorer, "ltx", None)
+
+    def large(tr, sp) -> bool:
+        sides = [max(b[2] - b[0], b[3] - b[1]) for b in (tr.boxes.get(i) for i in sp) if b is not None]
+        return bool(sides) and max(sides) >= restorer.ltx_min_size * frame_hw[0]
+
     def run_group(group) -> None:
         _bcc = (
             build_clip_canvas_gpu
             if getattr(frames, "device", None) is not None or isinstance(frames[group[0][2][0]], torch.Tensor)
             else build_clip_canvas
         )
-        ccs = [_bcc(tr, sp, frames, CANVAS_SIZE) for _, tr, sp, _ in group]
+        to_ltx = [ltx is not None and large(tr, sp) for _, tr, sp, _ in group]
+        ccs, outs = [None] * len(group), [None] * len(group)
+        small = [k for k, t in enumerate(to_ltx) if not t]
+        if small:
+            for k in small:
+                _, tr, sp, _ = group[k]
+                ccs[k] = _bcc(tr, sp, frames, CANVAS_SIZE)
+            if hasattr(restorer, "restore_canvases"):
+                res = restorer.restore_canvases([ccs[k].crops for k in small])
+            else:
+                res = [restorer.restore_canvas(ccs[k].crops) for k in small]
+            for k, r in zip(small, res):
+                outs[k] = r
+        for k in (k for k, t in enumerate(to_ltx) if t):
+            _, tr, sp, _ = group[k]
+            ccs[k] = build_fixed_canvas_gpu(tr, sp, frames, ltx.canvas)
+            outs[k] = ltx.restore_canvas(ccs[k].crops)
         tstats["groups"][len(group)] = tstats["groups"].get(len(group), 0) + 1
-        if hasattr(restorer, "restore_canvases"):
-            outs = restorer.restore_canvases([cc.crops for cc in ccs])
-        else:
-            outs = [restorer.restore_canvas(cc.crops) for cc in ccs]
         for (_, tr, sp, wts), cc, restored in zip(group, ccs, outs):
             while not err:
                 try:

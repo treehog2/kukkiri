@@ -26,6 +26,10 @@ dependencies = [
 
 [project.optional-dependencies]
 gui = ["PySide6>=6.8", "nvidia-ml-py>=12", "psutil>=5"]  # nvidia-ml-py + psutil: the usage meters
+ltx = [
+    "transformers==5.17.0", "accelerate==1.15.0", "einops==0.8.2", "scipy==1.18.1", "colour-science==0.4.7",
+    "av==18.1.0", "OpenImageIO==3.2.2.0", "pillow>=11", "tqdm>=4.66",
+]  # plus torchaudio with --no-deps (2.11 declares torch==2.11, imports fine on 2.14)
 
 [project.scripts]
 kukkiri = "kukkiri.cli:main"

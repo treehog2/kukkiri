@@ -34,6 +34,10 @@ upstream license file is reproduced unchanged in `licenses/APACHE-2.0.txt`.
 | CUDA runtime (cudart64_12.dll, Windows installer) | NVIDIA CUDA EULA (redistributable) | loaded by PyNvVideoCodec |
 | Microsoft Visual C++ runtime (msvcp140*.dll, Windows installer) | Microsoft Visual C++ Redistributable license | |
 | Torch-TensorRT | BSD-3 | |
+| LTX-2 `ltx-core`, `ltx-pipelines` (Lightricks) | Apache-2.0 | kiyo-ltx's model code; the kiyo-ltx **weights** are separate, under the LTX-2.x Community License (see the weights' `NOTICE.md`) |
+| Transformers, Accelerate (Hugging Face) | Apache-2.0 | imported by the LTX packages |
+| einops / SciPy / colour-science / PyAV / OpenImageIO / Pillow / tqdm / torchaudio | MIT / BSD-3 / BSD-3 / BSD-3 / Apache-2.0 / MIT-CMU / MPL-2.0 + MIT / BSD-2 | imported by the LTX packages |
+| Triton (`triton-windows` on Windows) | MIT | compiles kiyo-ltx's kernels |
 | PySide6 (Qt for Python) | LGPL-3.0 | desktop app only (`kukkiri[gui]`) |
 | FFmpeg (system binary) | LGPL-2.1+, or GPL-2+ for builds with libx264 | called as an external process for probing, remuxing, audio, and re-encoding inputs the GPU decoder cannot read to H.264; the Windows installer bundles the GPL build ffmpeg n8.1.3 from github.com/BtbN/FFmpeg-Builds (release autobuild-2026-09-22-13-18), whose source is ffmpeg.org release 8.1.3 |
 

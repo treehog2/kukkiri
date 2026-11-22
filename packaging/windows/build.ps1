@@ -27,6 +27,12 @@ Invoke-WebRequest "https://bootstrap.pypa.io/get-pip.py" -OutFile "$Out\dl\get-p
 if ($LASTEXITCODE) { throw "get-pip failed" }
 $py = "$Stage\python.exe"
 $pip = @("-m", "pip", "install", "--no-cache-dir", "--no-warn-script-location")
+# the same Python's C headers and import libraries, which the embeddable build lacks: Triton (kiyo-ltx's torch.compile)
+# builds a small module against them on first use. From python.org's NuGet package of the same version.
+Invoke-WebRequest "https://www.nuget.org/api/v2/package/python/3.12.10" -OutFile "$Out\dl\python-nuget.zip"
+Expand-Archive "$Out\dl\python-nuget.zip" -DestinationPath "$Out\dl\python-nuget"
+Copy-Item -Recurse "$Out\dl\python-nuget\tools\include" "$Stage\Include"
+Copy-Item -Recurse "$Out\dl\python-nuget\tools\libs" "$Stage\libs"
 
 # 2. the GPU stack and kukkiri. Wheels are fetched / built with the regular Python on the PATH (same 3.12): the
 # embeddable Python ignores PYTHONPATH, so pip cannot build source-only packages (tensorrt-cu13) inside it.
@@ -35,16 +41,23 @@ $idx = @("--index-url", "https://pypi.org/simple", "--extra-index-url", "https:/
          "--extra-index-url", "https://pypi.nvidia.com")
 $pins = @("torch==2.14.0+cu130", "torchvision==0.29.0+cu130", "numpy==2.3.5", "opencv-python-headless==5.0.0.93",
           "rfdetr==1.10.1", "PyNvVideoCodec==2.2.2", "tensorrt-cu13==11.3.0.99", "onnx==1.22.0",
-          "onnxconverter-common==1.16.0", "safetensors==0.8.0", "PySide6-Essentials==6.11.2", "nvidia-ml-py==13.615.71")
+          "onnxconverter-common==1.16.0", "safetensors==0.8.0", "PySide6-Essentials==6.11.2", "nvidia-ml-py==13.615.71",
+          # kiyo-ltx: what Lightricks' LTX packages import, and Triton for torch.compile
+          "transformers==5.17.0", "accelerate==1.15.0", "einops==0.8.2", "scipy==1.18.1", "colour-science==0.4.7",
+          "av==18.1.0", "OpenImageIO==3.2.2.0", "pillow", "tqdm", "triton-windows==3.8.0.post29")
 # torch_tensorrt pins tensorrt<11.2 but works with 11.3; --no-deps keeps pip from downgrading it
-$nodeps = @("torch_tensorrt==2.14.0+cu130", "dllist==2.0.0", "psutil==7.2.2")
+# torchaudio 2.11 declares torch==2.11 but imports fine on 2.14 (the LTX packages only import it)
+$nodeps = @("torch_tensorrt==2.14.0+cu130", "dllist==2.0.0", "psutil==7.2.2", "torchaudio==2.11.0+cu130",
+            # Lightricks' LTX-2 packages at a fixed commit; their published pins are older than the versions above
+            "ltx-core @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-core",
+            "ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-pipelines")
 & python -m pip wheel --wheel-dir $wh @idx @pins
 if ($LASTEXITCODE) { throw "fetching wheels failed" }
 & python -m pip wheel --no-deps --wheel-dir $wh @idx @nodeps .
 if ($LASTEXITCODE) { throw "fetching no-deps wheels failed" }
 & $py @pip --no-index --find-links $wh @pins
 if ($LASTEXITCODE) { throw "dependency install failed" }
-& $py @pip --no-index --find-links $wh --no-deps @nodeps kukkiri
+& $py @pip --no-index --find-links $wh --no-deps torch_tensorrt dllist psutil torchaudio ltx-core ltx-pipelines kukkiri
 if ($LASTEXITCODE) { throw "kukkiri install failed" }
 Remove-Item -Recurse -Force $wh
 # TensorRT's engine builder carries one resource DLL per GPU generation; drop the datacenter-only ones (A100 sm80,

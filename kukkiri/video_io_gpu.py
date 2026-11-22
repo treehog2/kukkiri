@@ -188,15 +188,18 @@ class SharedFrameStore:
         scale_to: tuple[int, int] | None = None,
         budget_bytes: int = 6 << 30,
         min_window: int = 256,
+        stride: int = 1,
     ):
         import PyNvVideoCodec as nvc
         from PyNvVideoCodec.decoders.SimpleDecoder import SimpleDecoder
 
         self.dec = SimpleDecoder(str(video), gpu_id, 0, 0, True, 0, 0, 0, 4, nvc.OutputColorType.RGB)
         meta = self.dec.get_stream_metadata()
-        self.n = int(meta.num_frames)
+        self.stride = stride
+        self._src = 0
+        self.n = -(-int(meta.num_frames) // stride)
         self.hw = (int(meta.height), int(meta.width))
-        self.fps = float(meta.average_fps)
+        self.fps = float(meta.average_fps) / stride
         self.device, self.batch = device, batch
         self.scale_to = None if scale_to is None or tuple(scale_to) == self.hw else tuple(scale_to)
         if self.scale_to is not None:
@@ -222,6 +225,11 @@ class SharedFrameStore:
                     frames = self.dec.get_batch_frames(self.batch)
                 if not frames:
                     return
+                if self.stride > 1:
+                    first, self._src = self._src, self._src + len(frames)
+                    frames = [f for k, f in enumerate(frames) if (first + k) % self.stride == 0]
+                    if not frames:
+                        continue
                 batch = GpuFrameStore._convert(self, frames)
                 torch.cuda.current_stream().synchronize()
                 with self._cv:
