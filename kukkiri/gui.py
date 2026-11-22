@@ -428,7 +428,7 @@ class MainWindow(QMainWindow):
         self.model.setItemText(0, f"{MODELS[0]} ({tr('latest')})")
         for i, m in enumerate(MODELS):
             if is_ltx(version_of(m)):
-                self.model.setItemText(i, f"{m} ({tr('best quality, needs a 16 GB GPU')})")
+                self.model.setItemText(i, f"{m} ({tr('best quality, needs an 8 GB GPU')})")
         for row, job in enumerate(self.jobs):
             self.table.item(row, _SECTION).setText(_section_text(job))
             self.table.item(row, _STATUS).setText(tr(job.status, **(job.status_args or {})))

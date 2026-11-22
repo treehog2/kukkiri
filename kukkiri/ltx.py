@@ -158,6 +158,9 @@ class LtxRestorer:
             self.restore_canvas(np.zeros((n_frames, self.canvas, self.canvas, 3), np.uint8))
         torch.cuda.synchronize()
 
+    def restore_clip(self, tr, sp, cc) -> np.ndarray:
+        return self.restore_canvas(cc.crops)
+
     @torch.inference_mode()
     def restore_canvas(self, crops) -> np.ndarray:
         from ltx_core.components.diffusion_steps import EulerDiffusionStep
@@ -180,6 +183,9 @@ class LtxRestorer:
             x = torch.cat([x, x[-1:].expand(m - n, -1, -1, -1)])
         video = (x.permute(3, 0, 1, 2)[None].float() / 127.5 - 1.0).to(self.dtype)
         ref = self.encoder(video)
+        if self.resident_blocks is not None:
+            del video, x
+            torch.cuda.empty_cache()
         sf = SpatioTemporalScaleFactors.default()
         latent = create_initial_video_latent(
             pixel_shape=VideoPixelShape(batch=1, frames=m, height=h, width=w, fps=FPS),
@@ -200,6 +206,9 @@ class LtxRestorer:
             res, _ = SimpleDenoiser()(self.model, state, None, sigmas.to(self.device), i, self.context, None)
             state = _step_state(state, res.denoised, EulerDiffusionStep(), sigmas, i)
         out = tools.unpatchify(tools.clear_conditioning(state)).latent
+        if self.resident_blocks is not None:
+            del state, res, spec
+            torch.cuda.empty_cache()
         frames = torch.cat(list(self.decoder.decode_video(out, None, g)))
         out = (frames[:n].float().clamp(0, 1) * 255 + 0.5).to(torch.uint8).flip(-1).cpu().numpy()
         if self.resident_blocks is not None:

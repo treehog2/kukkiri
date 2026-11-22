@@ -29,7 +29,7 @@ _STRINGS = {
     "Output folder": ("출력 폴더", "输出文件夹", "輸出資料夾"),
     "next to each input": ("각 원본 파일 옆", "与原视频相同位置", "與原影片相同位置"),
     "latest": ("최신", "最新", "最新"),
-    "best quality, needs a 16 GB GPU": ("최고 품질, 16 GB GPU 필요", "画质最佳，需要 16 GB 显存的 GPU", "畫質最佳，需要 16 GB 顯示記憶體的 GPU"),
+    "best quality, needs an 8 GB GPU": ("최고 품질, 8 GB GPU 필요", "画质最佳，需要 8 GB 显存的 GPU", "畫質最佳，需要 8 GB 顯示記憶體的 GPU"),
     "Keep 60 fps videos at their full frame rate (kiyo-ltx, about twice as slow)": (
         "60fps 동영상을 원래 프레임 속도로 유지 (kiyo-ltx, 약 2배 느림)",
         "60 fps 视频保持原帧率（kiyo-ltx，约慢一倍）",

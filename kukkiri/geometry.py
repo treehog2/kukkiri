@@ -97,6 +97,14 @@ def build_fixed_canvas_gpu(track, frames_idx: list[int], frames, size: int) -> C
     return _canvas_gpu(frames_idx, frames, size, [rect] * len(frames_idx), s, getattr(track, "fisheye", None))
 
 
+def fixed_canvas_layout(track, frames_idx: list[int], frame_hw: tuple[int, int], size: int) -> ClipCanvas:
+    rect = clip_window(track, frames_idx, frame_hw)
+    s = size / max(rect[2] - rect[0], rect[3] - rect[1])
+    th_tw, pad = _fit(rect, s, size)
+    n = len(frames_idx)
+    return ClipCanvas(list(frames_idx), [rect] * n, (s, s), [th_tw] * n, [pad] * n, None)
+
+
 def _canvas_gpu(frames_idx: list[int], frames, size: int, rects: list[Box], s: float, fisheye: int | None = None):
     import torch
     import torch.nn.functional as F

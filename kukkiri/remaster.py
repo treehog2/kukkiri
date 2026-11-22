@@ -87,6 +87,27 @@ LTX_LOW_VRAM_GB = 32
 LTX_MIN_VRAM_GB = 16
 
 
+def _frame_budget() -> int:
+    return int(float(os.environ.get("KUKKIRI_FRAME_BUDGET_GB", "6")) * 2**30)
+
+
+LTX_STAGED_GB = 15
+
+
+def _ltx_staged() -> bool:
+    import torch
+
+    env = os.environ.get("KUKKIRI_LTX_STAGED")
+    if env:
+        return env == "1"
+    gb = torch.cuda.get_device_properties(0).total_memory / 2**30
+    if gb < LTX_STAGED_GB:
+        os.environ.setdefault("KUKKIRI_FRAME_BUDGET_GB", "1.5")
+        logger.info(f"kiyo-ltx staged mode ({gb:.0f} GB GPU): detection, LTX and kiyo run as separate passes (slower)")
+        return True
+    return False
+
+
 def _ltx_resident_blocks() -> int | None:
     import torch
 
@@ -125,7 +146,11 @@ def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch
     if cfg.ltx:
         from kukkiri.ltx import LtxRestorer
 
-        restorer.ltx = LtxRestorer(weights_dir, compile=compile_ok, resident_blocks=_ltx_resident_blocks())
+        if _ltx_staged():
+            restorer.ltx = None
+            restorer.make_ltx = lambda: LtxRestorer(weights_dir, compile=compile_ok, resident_blocks=0)
+        else:
+            restorer.ltx = LtxRestorer(weights_dir, compile=compile_ok, resident_blocks=_ltx_resident_blocks())
         restorer.ltx_min_size = cfg.ltx_min_size
     return detector, restorer
 
@@ -357,7 +382,7 @@ def _remaster_once(
         logger.info(f"{fps:.3f} fps source: restoring 1 frame in {stride} ({fps / stride:.3f} fps out)")
         fps, n_frames = fps / stride, -(-n_frames // stride)
     try:
-        frames = SharedFrameStore(src, scale_to=scale_to, stride=stride)
+        frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget())
     except Exception as e:
         import PyNvVideoCodec as nvc
 
@@ -411,14 +436,53 @@ def _remaster_once(
     try:
         if detector.trt and not hasattr(detector, "_trt_ctx"):
             detector._trt_init()
-        restorer.warm(CANVAS_SIZE)
-        if getattr(restorer, "ltx", None) is not None:
-            restorer.ltx.warm(CLIP)
         pstats = {"n_frames": 0, "n_detections": 0, "n_tracks": 0, "tracks": []}
-        source = JobSource(len(frames), maxsize=256)
-        producer = threading.Thread(
-            target=_produce_jobs, args=(detector, frames, source, gap, min_length, pstats, cfg.cut_tv, cfg.vr, cfg.vr == "sbs" and cfg.vr_lens == "fisheye"), daemon=True
-        )
+        fisheye = cfg.vr == "sbs" and cfg.vr_lens == "fisheye"
+        if getattr(restorer, "make_ltx", None) is not None:
+            from kukkiri import staged
+
+            if progress:
+                progress(ProgressEvent(0.0, "detect", 0, n_frames))
+            plan_frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0, min_window=64)
+            events = staged.plan(lambda rec: _produce_jobs(detector, plan_frames, rec, gap, min_length, pstats,
+                                                           cfg.cut_tv, cfg.vr, fisheye), plan_frames, len(frames))
+            if "error" in pstats:
+                raise pstats["error"]
+            detector = plan_frames = None
+            staged.release_gpu()
+            ltx = restorer.make_ltx()
+            ltx.warm(CLIP)
+
+            def ltx_progress(k, n):
+                if progress:
+                    progress(ProgressEvent(100 * k / n, "ltx", k, n))
+
+            results = staged.ltx_pass(events, SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0,
+                                                               min_window=CLIP + 64), ltx,
+                                      restorer.ltx_min_size, work / "ltx", ltx_progress)
+            ltx = None
+            staged.release_gpu()
+            restorer.ltx = staged.ReplayLtx(results)
+            restorer.warm(CANVAS_SIZE)
+            source = JobSource(len(frames), maxsize=256)
+
+            def replay():
+                try:
+                    staged.replay(events, frames, source)
+                except BaseException as e:
+                    pstats["error"] = e
+                    source.close(len(frames))
+
+            producer = threading.Thread(target=replay, daemon=True)
+        else:
+            restorer.warm(CANVAS_SIZE)
+            if getattr(restorer, "ltx", None) is not None:
+                restorer.ltx.warm(CLIP)
+            source = JobSource(len(frames), maxsize=256)
+            producer = threading.Thread(
+                target=_produce_jobs, args=(detector, frames, source, gap, min_length, pstats, cfg.cut_tv, cfg.vr,
+                                            fisheye), daemon=True
+            )
         producer.start()
         touched = restore_stream(source, frames, restorer, sink)
         producer.join()

@@ -12,7 +12,7 @@ from kukkiri.weights import MODELS
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".m4v", ".webm", ".flv"}
 SENSITIVITY = {"normal": 1.0, "high": 0.6, "low": 1.4}
-LTX_MIN_VRAM_GB = 15
+LTX_MIN_VRAM_GB = 7.5
 LTX_VR_MIN_VRAM_GB = 30
 OUTPUT_TAG = ".kukkiri"
 

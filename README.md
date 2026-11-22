@@ -62,9 +62,11 @@ TensorRT engines are built into the same folder on the first run, which takes a 
 `kiyo-ltx-v1` restores with Lightricks' [LTX-2.5](https://huggingface.co/Lightricks/LTX-2.5) video diffusion model,
 fine-tuned to restore mosaics, for clearer detail on larger mosaics; small ones still go to kiyo. It needs:
 
-- a GPU with at least **16 GB** of memory. Below 32 GB it keeps part of the model in system memory and streams it
-  to the GPU as needed: the same result, but slower (about 1.5x on a 24 GB card, 1.75x on 16 GB, in our tests).
-  It stops with a message on less than 15 GB.
+- a GPU with at least **8 GB** of memory. Below 32 GB it keeps part of the model in system memory and streams it to
+  the GPU as needed: the same result, but slower (about 1.5x on a 24 GB card, 1.75x on 16 GB, in our tests). Below
+  15 GB it also runs in three passes (find the mosaics, restore the large ones with LTX, then the small ones and the
+  video), so the models are never on the GPU together; it needs about 8 GB free, so close other GPU programs on an
+  8 GB card. It stops with a message on less than 7.5 GB.
 - a **15 GB** download on first use (the folder `ltx-v1/` on Hugging Face)
 - a few minutes on the first run on a machine, to build its GPU kernels (cached in the weights folder afterwards)
 

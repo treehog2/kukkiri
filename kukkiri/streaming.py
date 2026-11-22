@@ -13,6 +13,7 @@ from kukkiri.geometry import (
     build_clip_canvas,
     build_clip_canvas_gpu,
     build_fixed_canvas_gpu,
+    fixed_canvas_layout,
     seam_weights,
     uncanvas_frame,
 )
@@ -149,6 +150,11 @@ class JobSource:
     def close(self, n_frames: int) -> None:
         self.frontier = n_frames
         self.q.put(None)
+
+
+def routes_to_ltx(tr, sp, min_size: float, frame_h: int) -> bool:
+    sides = [max(b[2] - b[0], b[3] - b[1]) for b in (tr.boxes.get(i) for i in sp) if b is not None]
+    return bool(sides) and max(sides) >= min_size * frame_h
 
 
 class StreamStalled(RuntimeError):
@@ -317,8 +323,7 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
     ltx = getattr(restorer, "ltx", None)
 
     def large(tr, sp) -> bool:
-        sides = [max(b[2] - b[0], b[3] - b[1]) for b in (tr.boxes.get(i) for i in sp) if b is not None]
-        return bool(sides) and max(sides) >= restorer.ltx_min_size * frame_hw[0]
+        return routes_to_ltx(tr, sp, restorer.ltx_min_size, frame_hw[0])
 
     def run_group(group) -> None:
         _bcc = (
@@ -341,8 +346,11 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
                 outs[k] = r
         for k in (k for k, t in enumerate(to_ltx) if t):
             _, tr, sp, _ = group[k]
-            ccs[k] = build_fixed_canvas_gpu(tr, sp, frames, ltx.canvas)
-            outs[k] = ltx.restore_canvas(ccs[k].crops)
+            if getattr(ltx, "needs_pixels", True) or getattr(tr, "fisheye", None):
+                ccs[k] = build_fixed_canvas_gpu(tr, sp, frames, ltx.canvas)
+            else:
+                ccs[k] = fixed_canvas_layout(tr, sp, frame_hw, ltx.canvas)
+            outs[k] = ltx.restore_clip(tr, sp, ccs[k])
         tstats["groups"][len(group)] = tstats["groups"].get(len(group), 0) + 1
         for (_, tr, sp, wts), cc, restored in zip(group, ccs, outs):
             while not err:
