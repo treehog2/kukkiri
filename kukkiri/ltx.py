@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 from pathlib import Path
 
@@ -107,6 +108,50 @@ def _load_transformer(path: Path, device: torch.device, keep: int | None = None)
     return X0Model(model).eval()
 
 
+def _fp32_conv3d(module: torch.nn.Module, frames: int = 8) -> None:
+    import torch.nn.functional as F
+
+    for m in module.modules():
+        if not isinstance(m, torch.nn.Conv3d):
+            continue
+
+        def forward(x, m=m):
+            w, b = m.weight.float(), None if m.bias is None else m.bias.float()
+
+            def conv(v):
+                return F.conv3d(v.float(), w, b, m.stride, m.padding, m.dilation, m.groups).to(x.dtype)
+
+            kt, st = m.kernel_size[0], m.stride[0]
+            if m.padding[0] or m.dilation[0] != 1:
+                return conv(x)
+            n = (x.shape[2] - kt) // st + 1
+            return torch.cat([conv(x[:, :, a * st:(min(a + frames, n) - 1) * st + kt]) for a in range(0, n, frames)], 2)
+
+        m.forward = forward
+
+
+def _chunk_attention(module: torch.nn.Module, rows: int = 1024) -> None:
+
+    def chunked(fn):
+        def call(q, k, v, heads, *mask):
+            if q.shape[1] <= rows:
+                return fn(q, k, v, heads, *mask)
+            parts = []
+            for a in range(0, q.shape[1], rows):
+                m = mask
+                if mask and mask[0] is not None and mask[0].shape[-2] == q.shape[1]:
+                    m = (mask[0][..., a:a + rows, :],)
+                parts.append(fn(q[:, a:a + rows], k, v, heads, *m))
+            return torch.cat(parts, 1)
+
+        return call
+
+    for m in module.modules():
+        for name in ("attention_function", "masked_attention_function"):
+            if callable(getattr(m, name, None)):
+                setattr(m, name, chunked(getattr(m, name)))
+
+
 def pad_len(n: int) -> int:
     return 8 * -(-(n - 1) // 8) + 1
 
@@ -131,6 +176,10 @@ class LtxRestorer:
         ).eval()
         dec = VideoDecoder(str(vae), self.dtype, self.device)._prepared_builder().build(device=self.device, dtype=self.dtype)
         self.decoder = disable_memory_efficient_decode(dec.eval())
+        if torch.cuda.get_device_capability(self.device)[0] < 8:
+            _chunk_attention(self.model)
+            _fp32_conv3d(self.encoder)
+            _fp32_conv3d(self.decoder)
         if compile:
             from ltx_core.model.transformer.compiling import CompilationConfig, compile_transformer
 
@@ -143,16 +192,21 @@ class LtxRestorer:
     def warm(self, n_frames: int) -> None:
         try:
             self.restore_canvas(np.zeros((n_frames, self.canvas, self.canvas, 3), np.uint8))
+            failed = None
+        except torch.OutOfMemoryError:
+            raise
         except Exception as e:
             if not self.compiled:
                 raise
+            failed = str(e).strip().splitlines()[-1][:300]
+        if failed is not None:
             import logging
 
-            logging.getLogger(__name__).warning(f"kiyo-ltx: compiling failed, continuing uncompiled (slower): "
-                                                f"{str(e).strip().splitlines()[-1][:300]}")
+            logging.getLogger(__name__).warning(f"kiyo-ltx: compiling failed, continuing uncompiled (slower): {failed}")
             torch._dynamo.reset()
             for k in ("model", "encoder", "decoder", "context"):
                 setattr(self, k, None)
+            gc.collect()
             torch.cuda.empty_cache()
             self.__init__(self.weights_dir, str(self.device), compile=False, resident_blocks=self.resident_blocks)
             self.restore_canvas(np.zeros((n_frames, self.canvas, self.canvas, 3), np.uint8))

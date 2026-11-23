@@ -174,7 +174,7 @@ def _restore_one(src: Path, dst: Path, args) -> int:
 
     weights = Path(args.weights)
     if args.start or args.duration:
-        with tempfile.TemporaryDirectory(prefix="kukkiri_cut_") as tmp:
+        with tempfile.TemporaryDirectory(prefix="kukkiri_cut_", ignore_cleanup_errors=True) as tmp:
             start, duration = _seconds(args.start or "0"), _seconds(args.duration) if args.duration else None
             until = f"+ {args.duration}" if args.duration else "to the end"
             print(f"cutting {args.start or '0'} {until}", file=sys.stderr)

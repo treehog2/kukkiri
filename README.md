@@ -67,6 +67,8 @@ fine-tuned to restore mosaics, for clearer detail on larger mosaics; small ones 
   15 GB it also runs in three passes (find the mosaics, restore the large ones with LTX, then the small ones and the
   video), so the models are never on the GPU together; it needs about 8 GB free, so close other GPU programs on an
   8 GB card. It stops with a message on less than 7.5 GB.
+  Cards older than the RTX 30 series (RTX 20, GTX 16) work too, but slowly: they lack bf16 support, so kiyo-ltx
+  computes some steps in smaller pieces (about 90 s per 3 s of video on a T4 in our tests).
 - a **15 GB** download on first use (the folder `ltx-v1/` on Hugging Face)
 - a few minutes on the first run on a machine, to build its GPU kernels (cached in the weights folder afterwards)
 
