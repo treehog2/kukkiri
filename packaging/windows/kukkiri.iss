@@ -50,6 +50,7 @@ Name: "{autodesktop}\kukkiri"; Filename: "{app}\pythonw.exe"; Parameters: """{ap
 Filename: "{app}\pythonw.exe"; Parameters: """{app}\kukkiri-gui.pyw"""; Description: "Start kukkiri"; Flags: postinstall nowait skipifsilent
 
 [InstallDelete]
+Type: filesandordirs; Name: "{app}\Lib\site-packages"
 Type: filesandordirs; Name: "{app}\weights"
 
 [UninstallDelete]

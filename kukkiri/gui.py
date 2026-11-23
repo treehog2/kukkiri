@@ -471,14 +471,11 @@ class MainWindow(QMainWindow):
 
 
     def _check_update(self) -> None:
-        from importlib.metadata import PackageNotFoundError, version
-
         from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
 
-        try:
-            self._installed = version("kukkiri")
-        except PackageNotFoundError:
-            return
+        from kukkiri import __version__
+
+        self._installed = __version__
         self._net = QNetworkAccessManager(self)
         req = QNetworkRequest(QUrl(f"https://api.github.com/repos/{PUBLIC_REPO}/releases/latest"))
         req.setRawHeader(b"Accept", b"application/vnd.github+json")
@@ -541,12 +538,7 @@ class MainWindow(QMainWindow):
         import platform
         from datetime import datetime
 
-        from importlib.metadata import PackageNotFoundError, version
-
-        try:
-            __version__ = version("kukkiri")
-        except PackageNotFoundError:
-            __version__ = "source"
+        from kukkiri import __version__
 
         default = str(Path.home() / f"kukkiri-log-{datetime.now():%Y%m%d-%H%M%S}.txt")
         path, _ = QFileDialog.getSaveFileName(self, tr("Save log"), default, "Text (*.txt)")
