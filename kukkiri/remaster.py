@@ -91,6 +91,7 @@ def _frame_budget() -> int:
     return int(float(os.environ.get("KUKKIRI_FRAME_BUDGET_GB", "6")) * 2**30)
 
 
+STAGED_SPANS = {"detect": (0.0, 15.0), "ltx": (15.0, 85.0), "remaster": (85.0, 100.0)}
 LTX_STAGED_GB = 15
 
 
@@ -410,6 +411,7 @@ def _remaster_once(
         stream=mux.stdin, idr_period=mux.idr_period(fps) if live_dir else None,
     )
     done = 0
+    span = [0.0, 100.0]
     last = [0.0]
     first = [0.0]
 
@@ -431,7 +433,8 @@ def _remaster_once(
             publish_live()
             if progress and n_frames:
                 eta = _eta_s(done, n_frames, now - first[0])
-                progress(ProgressEvent(100 * done / n_frames, "remaster", done, n_frames, eta))
+                pct = span[0] + (span[1] - span[0]) * done / n_frames
+                progress(ProgressEvent(pct, "remaster", done, n_frames, eta))
 
     try:
         if detector.trt and not hasattr(detector, "_trt_ctx"):
@@ -441,21 +444,35 @@ def _remaster_once(
         if getattr(restorer, "make_ltx", None) is not None:
             from kukkiri import staged
 
-            if progress:
-                progress(ProgressEvent(0.0, "detect", 0, n_frames))
+            span[:] = STAGED_SPANS["remaster"]
+            t_pass, last_event = [time.time()], [0.0]
+
+            def pass_progress(stage, k, n):
+                now = time.time()
+                if not progress or not n or (k < n and now - last_event[0] < 2):
+                    return
+                last_event[0] = now
+                lo, hi = STAGED_SPANS[stage]
+                eta = (n - k) * (now - t_pass[0]) / k if stage == "ltx" and k else None
+                progress(ProgressEvent(lo + (hi - lo) * k / n, stage, k, n, eta))
+
+            pass_progress("detect", 0, n_frames)
             plan_frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0, min_window=64)
             events = staged.plan(lambda rec: _produce_jobs(detector, plan_frames, rec, gap, min_length, pstats,
-                                                           cfg.cut_tv, cfg.vr, fisheye), plan_frames, len(frames))
+                                                           cfg.cut_tv, cfg.vr, fisheye), plan_frames, len(frames),
+                                lambda k, n: pass_progress("detect", k, n))
             if "error" in pstats:
                 raise pstats["error"]
             detector = plan_frames = None
             staged.release_gpu()
+            if progress:
+                progress(ProgressEvent(STAGED_SPANS["ltx"][0], "preparing", 0, n_frames))
             ltx = restorer.make_ltx()
             ltx.warm(CLIP)
+            t_pass[0] = time.time()
 
             def ltx_progress(k, n):
-                if progress:
-                    progress(ProgressEvent(100 * k / n, "ltx", k, n))
+                pass_progress("ltx", k, n)
 
             results = staged.ltx_pass(events, SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0,
                                                                min_window=CLIP + 64), ltx,
@@ -463,6 +480,8 @@ def _remaster_once(
             ltx = None
             staged.release_gpu()
             restorer.ltx = staged.ReplayLtx(results)
+            if progress:
+                progress(ProgressEvent(STAGED_SPANS["remaster"][0], "preparing", 0, n_frames))
             restorer.warm(CANVAS_SIZE)
             source = JobSource(len(frames), maxsize=256)
 

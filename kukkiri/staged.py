@@ -10,9 +10,9 @@ from kukkiri.streaming import JobSource, routes_to_ltx
 
 class _Recorder(JobSource):
 
-    def __init__(self, n_frames: int, frames):
+    def __init__(self, n_frames: int, frames, progress=None):
         super().__init__(n_frames)
-        self.frames, self.events, self._seen = frames, [], 0
+        self.frames, self.events, self._seen, self.progress, self._n = frames, [], 0, progress, n_frames
 
     def put(self, job: tuple) -> None:
         self.events.append(("job", job))
@@ -22,13 +22,15 @@ class _Recorder(JobSource):
         self.events.append(("advance", frontier))
         self.frames.release(self._seen)
         self._seen += 1
+        if self.progress:
+            self.progress(self._seen, self._n)
 
     def close(self, n_frames: int) -> None:
         self.events.append(("close", n_frames))
 
 
-def plan(produce, frames, n_frames: int) -> list:
-    rec = _Recorder(n_frames, frames)
+def plan(produce, frames, n_frames: int, progress=None) -> list:
+    rec = _Recorder(n_frames, frames, progress)
     produce(rec)
     return rec.events
 

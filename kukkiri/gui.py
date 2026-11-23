@@ -112,9 +112,15 @@ class Job:
     output: Path | None = None
 
 
+def _clock(seconds: float) -> str:
+    s = int(round(seconds))
+    return f"{s // 3600}:{s // 60 % 60:02d}:{s % 60:02d}" if s >= 3600 else f"{s // 60}:{s % 60:02d}"
+
+
 def _section_text(job: Job) -> str:
     if job.duration:
-        return f"{job.start or '0'} + {job.duration}"
+        start = _seconds(job.start or "0")
+        return f"{_clock(start)} - {_clock(start + _seconds(job.duration))}"
     return tr("from {start}", start=job.start) if job.start else tr("whole video")
 
 
@@ -127,7 +133,7 @@ class SectionDialog(QDialog):
         self.start = QLineEdit(job.start)
         self.start.setPlaceholderText(tr("from the beginning (e.g. 37:45)"))
         self.duration = QLineEdit(job.duration)
-        self.duration.setPlaceholderText(tr("to the end (e.g. 30)"))
+        self.duration.setPlaceholderText(tr("to the end (e.g. 0:30 for 30 seconds)"))
         form = QFormLayout()
         form.addRow(tr("Start"), self.start)
         form.addRow(tr("Duration"), self.duration)
@@ -615,7 +621,8 @@ class MainWindow(QMainWindow):
             if m:
                 stage, pct, eta, fps = m.group(1), float(m.group(2)), m.group(3), m.group(4)
                 label = {"remaster": "Restoring", "remux": "Finishing", "preparing": "Preparing",
-                         "download": "Downloading weights"}.get(stage, stage)
+                         "download": "Downloading weights", "detect": "Finding mosaics",
+                         "ltx": "Restoring with LTX"}.get(stage, stage)
                 self._set(self.current, label, pct, tr("{n} min", n=f"{float(eta):.1f}") if eta else "",
                           f"{fps} fps" if fps else "")
                 continue
