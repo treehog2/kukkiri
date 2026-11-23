@@ -30,6 +30,10 @@ DiskSliceSize=2000000000
 SetupIconFile=kukkiri.ico
 UninstallDisplayIcon={app}\kukkiri.ico
 WizardStyle=modern
+ExtraDiskSpaceRequired=17179869184
+
+[Messages]
+SelectDirBrowseLabel=kukkiri and the models it downloads on first use (up to about 16 GB for kiyo-ltx) will be stored in this folder. To continue, click Next. If you would like to select a different folder, click Browse.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked

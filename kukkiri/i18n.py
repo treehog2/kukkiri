@@ -3,10 +3,10 @@ from __future__ import annotations
 LANGUAGES = {"en": "English", "ko": "한국어", "zh_CN": "简体中文", "zh_TW": "繁體中文"}
 
 _STRINGS = {
-    "Add videos…": ("동영상 추가…", "添加视频…", "新增影片…"),
-    "Add folder…": ("폴더 추가…", "添加文件夹…", "新增資料夾…"),
+    "Add videos": ("동영상 추가", "添加视频", "新增影片"),
+    "Add folder": ("폴더 추가", "添加文件夹", "新增資料夾"),
     "Remove": ("제거", "移除", "移除"),
-    "Advanced…": ("고급…", "高级…", "進階…"),
+    "Advanced": ("고급", "高级", "進階"),
     "Before/after previews": ("전후 비교 미리보기", "前后对比预览", "前後對比預覽"),
     "Also write up to 3 short side-by-side clips (with a kukkiri watermark) of the most restored moments, next to "
     "each restored video": (
@@ -19,7 +19,7 @@ _STRINGS = {
     "Log": ("로그", "日志", "記錄"),
     "System check": ("시스템 점검", "系统检查", "系統檢查"),
     "Language": ("언어", "语言", "語言"),
-    "Browse…": ("찾아보기…", "浏览…", "瀏覽…"),
+    "Browse": ("찾아보기", "浏览", "瀏覽"),
     "Choose folder": ("폴더 선택", "选择文件夹", "選擇資料夾"),
     "Add videos": ("동영상 추가", "添加视频", "新增影片"),
     "Videos": ("동영상", "视频", "影片"),
@@ -81,6 +81,18 @@ _STRINGS = {
     "Downloading weights": ("모델 다운로드 중", "正在下载模型", "正在下載模型"),
     "Finding mosaics": ("모자이크 찾는 중", "正在查找马赛克", "正在尋找馬賽克"),
     "Restoring with LTX": ("LTX로 복원 중", "正在用 LTX 修复", "正在用 LTX 修復"),
+    "Save log": ("로그 저장", "保存日志", "儲存日誌"),
+    "Log saved to {path}": ("로그를 {path}에 저장했습니다", "日志已保存到 {path}", "日誌已儲存到 {path}"),
+    "Support": ("지원", "支持", "支援"),
+    "Discord (unofficial)": ("Discord (비공식)", "Discord（非官方）", "Discord（非官方）"),
+    "Discord {n} (unofficial)": ("Discord {n} (비공식)", "Discord {n}（非官方）", "Discord {n}（非官方）"),
+    "kukkiri {latest} is available (this is {installed}).": (
+        "kukkiri {latest} 버전을 사용할 수 있습니다 (현재 {installed}).",
+        "kukkiri {latest} 已发布（当前为 {installed}）。",
+        "kukkiri {latest} 已發布（目前為 {installed}）。",
+    ),
+    "Open release page": ("릴리스 페이지 열기", "打开发布页面", "開啟發布頁面"),
+    "Later": ("나중에", "稍后", "稍後"),
     "Checking": ("확인 중", "正在检查", "正在檢查"),
     "Cutting section": ("구간 자르는 중", "正在截取片段", "正在擷取片段"),
     "Cancelled": ("취소됨", "已取消", "已取消"),

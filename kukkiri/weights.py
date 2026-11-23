@@ -12,19 +12,19 @@ BASE = "https://huggingface.co/treehog/kukkiri/resolve/main"
 BASE_URL: str | None = f"{BASE}/{VERSION}"
 RELEASES = {
     "v4": ("seg_medium", {
-        "detector.safetensors": ("detector.safetensors", 141176868, "43a37ca65c3d6a6d8cca9c2feb8e5621b908bb085a718208f790a62ccb821327"),
-        "detector.json": ("detector.json", 2326, "c9367acbefd8df6a6e526e4f84f920e1eb0a0f3c091436474533131bb85a4429"),
+        "detector.safetensors": ("detector.safetensors", 141176868, "97a73959ace88973a9eb4a1bf7aab931ef3c8ce9671b979597521dd4986f5340"),
+        "detector.json": ("detector.json", 2326, "4b6536e9df401d62b49b0df81a803ad5e74ad29e7294ea3c83de2a156d0d85f4"),
         "restorer.safetensors": ("restorer.safetensors", 39085084, "c7480977eb35246682fe6256959f7afe79f6db1f17ae8f6c2c16488a5fc6f766"),
-        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-medium.h16.onnx", 65103632, "a9371a3a7899cc22e6be127cb1fb7b61e7cc79e2eeb5523a3eb13afbd2c107e0"),
+        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-medium.h16.onnx", 65103632, "a4dfc5adfce2a720d8da5bbcfb1d8c05f7ffdde8a2c119cad2fe05e492cdaa77"),
     }),
     "ltx-v1": ("seg_medium", {
-        "detector.safetensors": ("detector.safetensors", 141176868, "43a37ca65c3d6a6d8cca9c2feb8e5621b908bb085a718208f790a62ccb821327"),
-        "detector.json": ("detector.json", 2326, "c9367acbefd8df6a6e526e4f84f920e1eb0a0f3c091436474533131bb85a4429"),
+        "detector.safetensors": ("detector.safetensors", 141176868, "97a73959ace88973a9eb4a1bf7aab931ef3c8ce9671b979597521dd4986f5340"),
+        "detector.json": ("detector.json", 2326, "4b6536e9df401d62b49b0df81a803ad5e74ad29e7294ea3c83de2a156d0d85f4"),
         "restorer.safetensors": ("restorer.safetensors", 39085084, "c7480977eb35246682fe6256959f7afe79f6db1f17ae8f6c2c16488a5fc6f766"),
         "transformer.safetensors": ("ltx-transformer.safetensors", 13364075432, "9712079e1b0ee20a9a47efbd0278cc4fb0eb7b88f9571e9d4d9fdfec70ccc94e"),
         "vae.safetensors": ("ltx-vae.safetensors", 1452269922, "685b06ee3d9b2039647698fc4ea33175112462fc374e2777312c907897dfce8d"),
         "prompt.safetensors": ("ltx-prompt.safetensors", 8388704, "46f8652e075d12b501f6a21bda80e373dd956aa0f1ce897ca0c82ff7b21af511"),
-        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-medium.h16.onnx", 65103632, "a9371a3a7899cc22e6be127cb1fb7b61e7cc79e2eeb5523a3eb13afbd2c107e0"),
+        "detector-b32-fp16.onnx": ("export_b32_fp16/rfdetr-seg-medium.h16.onnx", 65103632, "a4dfc5adfce2a720d8da5bbcfb1d8c05f7ffdde8a2c119cad2fe05e492cdaa77"),
     }),
     "v3": ("seg_small", {
         "detector.safetensors": ("detector.safetensors", 135624836, "fbdd397d840844568c3a566c27ecda2ea5ad820bd9668bf6a6d73e3ef6982b31"),
@@ -81,7 +81,11 @@ def default_dir(version: str = VERSION) -> Path:
         base = Path(os.environ.get("LOCALAPPDATA") or Path.home())
     else:
         base = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
-    return base / "kukkiri" / "weights" / version
+    per_user = base / "kukkiri" / "weights" / version
+    root = os.environ.get("KUKKIRI_WEIGHTS_ROOT")
+    if root and not (per_user.is_dir() and any(per_user.iterdir())):
+        return Path(root) / version
+    return per_user
 
 
 def _sha256(path: Path) -> str:

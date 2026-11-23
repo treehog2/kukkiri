@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import QLocale, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, _seconds, collect_videos
+from kukkiri.constants import DISCORD_INVITES, HF_REPO, PUBLIC_REPO
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
 from kukkiri.weights import MODELS, default_dir, download_size, is_ltx, missing, version_of
 
@@ -161,6 +162,43 @@ class SectionDialog(QDialog):
         self.accept()
 
 
+def worth_updating(tag: str, installed: str) -> bool:
+    def parts(v):
+        return tuple(int(x) for x in v.lstrip("v").split("+")[0].split("."))[:2]
+
+    try:
+        return parts(tag) > parts(installed)
+    except ValueError:
+        return False
+
+
+def support_links() -> list[tuple[str, str]]:
+    links = [("GitHub", f"https://github.com/{PUBLIC_REPO}/issues"),
+             ("Hugging Face", f"https://huggingface.co/{HF_REPO}/discussions")]
+    if len(DISCORD_INVITES) == 1:
+        links.append((tr("Discord (unofficial)"), DISCORD_INVITES[0]))
+    else:
+        links += [(tr("Discord {n} (unofficial)", n=i), url) for i, url in enumerate(DISCORD_INVITES, 1)]
+    return links
+
+
+class SupportDialog(QDialog):
+
+    def __init__(self, parent) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(tr("Support"))
+        self.setMinimumWidth(320)
+        layout = QVBoxLayout(self)
+        for name, url in support_links():
+            link = QLabel(f'<a href="{url}">{name}</a>')
+            link.setOpenExternalLinks(True)
+            link.setTextInteractionFlags(Qt.TextInteractionFlag.TextBrowserInteraction)
+            layout.addWidget(link)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+
 class CheckDialog(QDialog):
 
     MARKS = {"ok": ("✓", "#3a9a5b"), "info": ("•", None), "warn": ("!", "#d08a1c"), "fail": ("✗", "#d8394f")}
@@ -297,8 +335,12 @@ class MainWindow(QMainWindow):
         self.check_btn = QPushButton()
         self.check_btn.setFlat(True)
         self.check_btn.clicked.connect(self._system_check)
+        self.support_btn = QPushButton()
+        self.support_btn.setFlat(True)
+        self.support_btn.clicked.connect(lambda: SupportDialog(self).exec())
         top = QHBoxLayout()
         top.addStretch(1)
+        top.addWidget(self.support_btn)
         top.addWidget(self.check_btn)
         top.addWidget(self.language)
 
@@ -385,14 +427,24 @@ class MainWindow(QMainWindow):
         self.log.setReadOnly(True)
         self.log.setMaximumBlockCount(2000)
         self.log.setFixedHeight(130)
+        self._full_log: list[str] = []
         log_label = QLabel()
+        self.save_log_btn = QPushButton()
+        self.save_log_btn.setFlat(True)
+        self.save_log_btn.clicked.connect(self._save_log)
+        log_row = QHBoxLayout()
+        log_row.addWidget(log_label)
+        log_row.addStretch(1)
+        log_row.addWidget(self.save_log_btn)
 
-        for setter, key in ((self.check_btn.setText, "System check"), (self.add_btn.setText, "Add videos…"),
-                            (self.folder_btn.setText, "Add folder…"), (self.remove_btn.setText, "Remove"),
-                            (self.advanced_btn.setText, "Advanced…"),
+        for setter, key in ((self.check_btn.setText, "System check"), (self.add_btn.setText, "Add videos"),
+                            (self.folder_btn.setText, "Add folder"), (self.remove_btn.setText, "Remove"),
+                            (self.advanced_btn.setText, "Advanced"),
                             (self.previews.setText, "Before/after previews"),
                             (self.run_btn.setText, "Start"), (self.cancel_btn.setText, "Stop"),
                             (log_label.setText, "Log"), (self.outdir.setPlaceholderText, "next to each input"),
+                            (self.save_log_btn.setText, "Save log"),
+                            (self.support_btn.setText, "Support"),
                             (self.previews.setToolTip, "Also write up to 3 short side-by-side clips (with a kukkiri "
                              "watermark) of the most restored moments, next to each restored video")):
             self._t(setter, key)
@@ -402,7 +454,7 @@ class MainWindow(QMainWindow):
         root.addLayout(form)
         root.addWidget(self.table, 1)
         root.addLayout(buttons)
-        root.addWidget(log_label)
+        root.addLayout(log_row)
         root.addWidget(self.log)
         w = QWidget()
         w.setLayout(root)
@@ -415,6 +467,42 @@ class MainWindow(QMainWindow):
         self._timer.timeout.connect(lambda: self.meter_label.setText(self.meters.text()))
         self._timer.start(2000)
         self._retranslate()
+        QTimer.singleShot(2000, self._check_update)
+
+
+    def _check_update(self) -> None:
+        from importlib.metadata import PackageNotFoundError, version
+
+        from PySide6.QtNetwork import QNetworkAccessManager, QNetworkRequest
+
+        try:
+            self._installed = version("kukkiri")
+        except PackageNotFoundError:
+            return
+        self._net = QNetworkAccessManager(self)
+        req = QNetworkRequest(QUrl(f"https://api.github.com/repos/{PUBLIC_REPO}/releases/latest"))
+        req.setRawHeader(b"Accept", b"application/vnd.github+json")
+        req.setTransferTimeout(5000)
+        reply = self._net.get(req)
+        reply.finished.connect(lambda: self._update_reply(reply))
+
+    def _update_reply(self, reply) -> None:
+        reply.deleteLater()
+        try:
+            release = json.loads(bytes(reply.readAll()).decode())
+            latest, url = release["tag_name"], release["html_url"]
+        except (ValueError, KeyError, TypeError):
+            return
+        if worth_updating(latest, self._installed):
+            box = QMessageBox(self)
+            box.setWindowTitle("kukkiri")
+            box.setText(tr("kukkiri {latest} is available (this is {installed}).", latest=latest.lstrip("v"),
+                           installed=self._installed))
+            open_btn = box.addButton(tr("Open release page"), QMessageBox.ButtonRole.AcceptRole)
+            box.addButton(tr("Later"), QMessageBox.ButtonRole.RejectRole)
+            box.exec()
+            if box.clickedButton() is open_btn:
+                QDesktopServices.openUrl(QUrl(url))
 
 
     def _t(self, setter, key: str) -> None:
@@ -445,6 +533,30 @@ class MainWindow(QMainWindow):
         self._status_key = key
         self.statusBar().showMessage(tr(key))
 
+    def _log_full(self, line: str) -> None:
+        self._full_log.append(line)
+        del self._full_log[:-20000]
+
+    def _save_log(self) -> None:
+        import platform
+        from datetime import datetime
+
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            __version__ = version("kukkiri")
+        except PackageNotFoundError:
+            __version__ = "source"
+
+        default = str(Path.home() / f"kukkiri-log-{datetime.now():%Y%m%d-%H%M%S}.txt")
+        path, _ = QFileDialog.getSaveFileName(self, tr("Save log"), default, "Text (*.txt)")
+        if not path:
+            return
+        head = [f"kukkiri {__version__}, model {self.model.currentData()}, {platform.platform()}, "
+                f"Python {platform.python_version()}", ""]
+        Path(path).write_text("\n".join(head + self._full_log) + "\n", encoding="utf-8")
+        self.statusBar().showMessage(tr("Log saved to {path}", path=path), 8000)
+
     def _system_check(self) -> None:
         CheckDialog(self, ["-m", "kukkiri", "check", "--weights", self.weights.text(),
                            "--model", self.model.currentData()]).exec()
@@ -462,7 +574,7 @@ class MainWindow(QMainWindow):
         row = QHBoxLayout()
         row.addWidget(edit)
         b = QPushButton()
-        self._t(b.setText, "Browse…")
+        self._t(b.setText, "Browse")
 
         def browse():
             d = QFileDialog.getExistingDirectory(self, tr("Choose folder"), edit.text() or str(Path.home()))
@@ -605,6 +717,8 @@ class MainWindow(QMainWindow):
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read)
         self.proc.finished.connect(self._finished)
+        self._log_full(f"--- {job.src.name} -> {job.output}")
+        self._log_full("$ kukkiri " + " ".join(args[2:] if args[:2] == ["-m", "kukkiri"] else args))
         self.log.appendPlainText(f"--- {job.src.name} -> {job.output}")
         self._set(self.current, "Starting", 0, "", "")
         self.cancel_btn.setEnabled(True)
@@ -618,6 +732,8 @@ class MainWindow(QMainWindow):
             if not line:
                 continue
             m = _PROGRESS_RE.match(line)
+            if not m:
+                self._log_full(line)
             if m:
                 stage, pct, eta, fps = m.group(1), float(m.group(2)), m.group(3), m.group(4)
                 label = {"remaster": "Restoring", "remux": "Finishing", "preparing": "Preparing",

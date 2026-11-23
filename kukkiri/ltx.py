@@ -108,48 +108,41 @@ def _load_transformer(path: Path, device: torch.device, keep: int | None = None)
     return X0Model(model).eval()
 
 
-def _fp32_conv3d(module: torch.nn.Module, frames: int = 8) -> None:
-    import torch.nn.functional as F
+FP16_ENCODER_FP32_FROM = 5
 
+
+def _fp32_norms(module: torch.nn.Module) -> None:
     for m in module.modules():
-        if not isinstance(m, torch.nn.Conv3d):
-            continue
-
-        def forward(x, m=m):
-            w, b = m.weight.float(), None if m.bias is None else m.bias.float()
-
-            def conv(v):
-                return F.conv3d(v.float(), w, b, m.stride, m.padding, m.dilation, m.groups).to(x.dtype)
-
-            kt, st = m.kernel_size[0], m.stride[0]
-            if m.padding[0] or m.dilation[0] != 1:
-                return conv(x)
-            n = (x.shape[2] - kt) // st + 1
-            return torch.cat([conv(x[:, :, a * st:(min(a + frames, n) - 1) * st + kt]) for a in range(0, n, frames)], 2)
-
-        m.forward = forward
+        if "norm" in type(m).__name__.lower():
+            m.float()
+            m.forward = (lambda f: lambda x, *a, **k: f(x.float(), *a, **k).to(x.dtype))(m.forward)
 
 
-def _chunk_attention(module: torch.nn.Module, rows: int = 1024) -> None:
+def _fp16_vae(encoder: torch.nn.Module, decoder: torch.nn.Module) -> None:
+    _fp32_norms(encoder)
+    _fp32_norms(decoder)
+    for i, b in enumerate(encoder.down_blocks):
+        if i >= FP16_ENCODER_FP32_FROM:
+            b.float()
+            if i == FP16_ENCODER_FP32_FROM:
+                b.register_forward_pre_hook(lambda m, a: tuple(t.float() if torch.is_tensor(t) else t for t in a))
+    for name in ("per_channel_statistics", "conv_norm_out", "conv_act", "conv_out"):
+        getattr(encoder, name).float()
 
-    def chunked(fn):
+
+def _fp16_attention(module: torch.nn.Module) -> None:
+
+    def half(fn):
         def call(q, k, v, heads, *mask):
-            if q.shape[1] <= rows:
-                return fn(q, k, v, heads, *mask)
-            parts = []
-            for a in range(0, q.shape[1], rows):
-                m = mask
-                if mask and mask[0] is not None and mask[0].shape[-2] == q.shape[1]:
-                    m = (mask[0][..., a:a + rows, :],)
-                parts.append(fn(q[:, a:a + rows], k, v, heads, *m))
-            return torch.cat(parts, 1)
+            m = tuple(x.half() if torch.is_tensor(x) and x.is_floating_point() else x for x in mask)
+            return fn(q.half(), k.half(), v.half(), heads, *m).to(q.dtype)
 
         return call
 
     for m in module.modules():
         for name in ("attention_function", "masked_attention_function"):
             if callable(getattr(m, name, None)):
-                setattr(m, name, chunked(getattr(m, name)))
+                setattr(m, name, half(getattr(m, name)))
 
 
 def pad_len(n: int) -> int:
@@ -169,17 +162,20 @@ class LtxRestorer:
         tr, vae, prompt = ltx_paths(Path(weights_dir))
         self.weights_dir, self.compiled, self.resident_blocks = weights_dir, compile, resident_blocks
         self.device, self.dtype = torch.device(device), torch.bfloat16
+        older = torch.cuda.get_device_capability(self.device)[0] < 8
+        self.vae_dtype = torch.float16 if older else self.dtype
         self.context = load_file(str(prompt))["video_encoding"].to(self.device, self.dtype)
         self.model = _load_transformer(tr, self.device, resident_blocks)
-        self.encoder = ImageConditioner(str(vae), self.dtype, self.device)._encoder_builder.build(
-            device=self.device, dtype=self.dtype
+        self.encoder = ImageConditioner(str(vae), self.vae_dtype, self.device)._encoder_builder.build(
+            device=self.device, dtype=self.vae_dtype
         ).eval()
-        dec = VideoDecoder(str(vae), self.dtype, self.device)._prepared_builder().build(device=self.device, dtype=self.dtype)
+        dec = VideoDecoder(str(vae), self.vae_dtype, self.device)._prepared_builder().build(
+            device=self.device, dtype=self.vae_dtype
+        )
         self.decoder = disable_memory_efficient_decode(dec.eval())
-        if torch.cuda.get_device_capability(self.device)[0] < 8:
-            _chunk_attention(self.model)
-            _fp32_conv3d(self.encoder)
-            _fp32_conv3d(self.decoder)
+        if older:
+            _fp16_attention(self.model)
+            _fp16_vae(self.encoder, self.decoder)
         if compile:
             from ltx_core.model.transformer.compiling import CompilationConfig, compile_transformer
 
@@ -235,8 +231,8 @@ class LtxRestorer:
         m = pad_len(n)
         if m > n:
             x = torch.cat([x, x[-1:].expand(m - n, -1, -1, -1)])
-        video = (x.permute(3, 0, 1, 2)[None].float() / 127.5 - 1.0).to(self.dtype)
-        ref = self.encoder(video)
+        video = (x.permute(3, 0, 1, 2)[None].float() / 127.5 - 1.0).to(self.vae_dtype)
+        ref = self.encoder(video).to(self.dtype)
         if self.resident_blocks is not None:
             del video, x
             torch.cuda.empty_cache()
@@ -263,7 +259,7 @@ class LtxRestorer:
         if self.resident_blocks is not None:
             del state, res, spec
             torch.cuda.empty_cache()
-        frames = torch.cat(list(self.decoder.decode_video(out, None, g)))
+        frames = torch.cat(list(self.decoder.decode_video(out.to(self.vae_dtype), None, g)))
         out = (frames[:n].float().clamp(0, 1) * 255 + 0.5).to(torch.uint8).flip(-1).cpu().numpy()
         if self.resident_blocks is not None:
             del frames

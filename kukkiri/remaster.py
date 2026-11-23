@@ -239,11 +239,19 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float, vr=None, fi
         tr.fisheye = eye_size(w) if fisheye and fisheye_share(tr) > 0.5 else None
 
     source_w = [0]
+    is_face: dict[int, bool] = {}
+
+    def face(tr) -> bool:
+        if tr.track_id not in is_face:
+            is_face[tr.track_id] = is_face_track(tr)
+        return is_face[tr.track_id]
 
     def close(tracks):
         for tr in tracks:
             place(tr)
-            if is_face_track(tr):
+            verdict = face(tr)
+            is_face.pop(tr.track_id, None)
+            if verdict:
                 stats["n_face_tracks"] = stats.get("n_face_tracks", 0) + 1
                 continue
             stats["n_tracks"] += 1
@@ -276,7 +284,7 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float, vr=None, fi
                 for tr in tk.active:
                     place(tr)
                     for job in em.poll(tr, tk.confirmed[tr.track_id]):
-                        if not is_face_track(tr):
+                        if not face(tr):
                             source.put(job)
                 source.advance(min([em.next_start(tr) for tr in tk.active] + [fi + 1]))
                 fi += 1
@@ -445,15 +453,21 @@ def _remaster_once(
             from kukkiri import staged
 
             span[:] = STAGED_SPANS["remaster"]
-            t_pass, last_event = [time.time()], [0.0]
+            t_pass, last_event, first_done = [time.time()], [0.0], [None]
 
             def pass_progress(stage, k, n):
                 now = time.time()
+                if stage == "ltx" and k == 1:
+                    first_done[0] = now
                 if not progress or not n or (k < n and now - last_event[0] < 2):
                     return
                 last_event[0] = now
                 lo, hi = STAGED_SPANS[stage]
-                eta = (n - k) * (now - t_pass[0]) / k if stage == "ltx" and k else None
+                eta = None
+                if stage == "ltx" and k >= 2 and first_done[0]:
+                    eta = (n - k) * (now - first_done[0]) / (k - 1)
+                elif stage == "detect" and k > 32:
+                    eta = (n - k) * (now - t_pass[0]) / k
                 progress(ProgressEvent(lo + (hi - lo) * k / n, stage, k, n, eta))
 
             pass_progress("detect", 0, n_frames)

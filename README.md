@@ -49,7 +49,9 @@ They are published at [treehog/kukkiri](https://huggingface.co/treehog/kukkiri) 
 The first restore downloads them: the detector (RF-DETR seg-medium, 141 MB, plus its 65 MB ONNX export) and the
 restorer (BasicVSR++, 39 MB) as safetensors, checked against the SHA-256 in `kukkiri/weights.py`. They go to a per-user folder
 (`%LOCALAPPDATA%\kukkiri\weights\<version>` on Windows, `~/.cache/kukkiri/weights/<version>` elsewhere), or to the folder in
-`KUKKIRI_WEIGHTS` or `--weights`. The Windows app downloads them the same way on first use. To fetch them ahead of time:
+`KUKKIRI_WEIGHTS` or `--weights`. The Windows app downloads them on first use into the `models` folder inside the
+folder you installed it to (kiyo-ltx needs about 15 GB there); versions already downloaded to the per-user folder by an
+older install stay where they are. To fetch them ahead of time:
 
 ```
 kukkiri download-weights [folder]
@@ -160,7 +162,7 @@ Files are restored one after another; each row shows its progress, speed and tim
 double-click. A row's ✂ button restores only a section of that video. Stop ends the current file (its partial output
 is removed) and pauses the rest of the queue. The window comes in English, Korean and Chinese (simplified and
 traditional), shows GPU, CPU and memory use, and **System check** tests the GPU, driver, disk, model files and ffmpeg
-(also `kukkiri check` on the command line).
+(also `kukkiri check` on the command line). **Save log** writes the full log to a text file.
 
 ## How it works
 

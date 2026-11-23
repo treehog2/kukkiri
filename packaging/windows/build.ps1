@@ -89,7 +89,7 @@ Copy-Item "$($ff.FullName)\LICENSE.txt" "$Stage\ffmpeg\LICENSE.txt"
 
 # 4. launchers, licenses
 Copy-Item "packaging\windows\kukkiri-gui.pyw" "$Stage\"
-Set-Content "$Stage\kukkiri.cmd" "@echo off`r`nsetlocal`r`nset PATH=%~dp0ffmpeg;%PATH%`r`n`"%~dp0python.exe`" -m kukkiri %*"
+Set-Content "$Stage\kukkiri.cmd" "@echo off`r`nsetlocal`r`nset PATH=%~dp0ffmpeg;%PATH%`r`nif not defined KUKKIRI_WEIGHTS_ROOT set KUKKIRI_WEIGHTS_ROOT=%~dp0models`r`n`"%~dp0python.exe`" -m kukkiri %*"
 Copy-Item "LICENSE", "LICENSE-EXCEPTION.md", "NOTICE.md", "README.md" "$Stage\"
 Copy-Item -Recurse "licenses" "$Stage\licenses"
 Write-Output ("stage: {0:N0} MB" -f ((Get-ChildItem $Stage -Recurse -File | Measure-Object Length -Sum).Sum / 1MB))

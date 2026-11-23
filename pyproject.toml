@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kukkiri"
-version = "0.1.0"
+version = "0.0.0.dev0"
 description = "Restore mosaic-censored video"
 readme = "README.md"
 license = "GPL-3.0-only AND Apache-2.0"
