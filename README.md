@@ -9,9 +9,11 @@ back into the original video with the source audio.
 It runs as one streaming pass on an NVIDIA GPU: decoding, detection, restoration and encoding overlap, and only a
 bounded window of frames is ever held in memory, so a two-hour film needs no more memory than a two-minute clip.
 
+It also works the other way: [`kukkiri add-mosaic`](#add-mosaics) adds a block mosaic over the bare genitals in a video.
+
 [![original, mosaic and kukkiri side by side](docs/media/strawberry.webp)](docs/media/strawberry.mp4)
 
-*Left to right: original, mosaic, kukkiri. An AI-generated clip with a synthetic mosaic; click for the full-quality video.*
+*Left to right: original, mosaic, kukkiri (kiyo-ltx-v1, `--sensitivity high`). An AI-generated clip with a synthetic mosaic; click for the full-quality video.*
 
 **On Windows:** download the installer, [kukkiri-setup.exe](https://huggingface.co/treehog/kukkiri/resolve/main/windows/kukkiri-setup.exe) (about 3 GB), and follow the
 [Windows guide](docs/windows.md), which walks through installing and using the app with screenshots.
@@ -149,6 +151,21 @@ skipped for sections.
 
 Inputs in containers or codecs the GPU decoder cannot read directly (AVI, WMV, MPEG-TS, MPEG-PS, ...) are first
 remuxed or re-encoded to H.264 MP4 automatically.
+
+## Add mosaics
+
+kukkiri can also do the opposite: add a block mosaic over the bare genitals in a video, with square blocks of about a
+36th of the frame height on a grid fixed to the frame.
+
+```
+kukkiri add-mosaic input.mp4
+```
+
+The result goes next to the input as `<name>.kukkiri-mosaic.mp4` (or to `-o`); several files and folders work as
+with `restore`. `--block` sets the block size in pixels; `--sensitivity high` misses fewer (and may mosaic a few
+things that are not genitals). It uses the detector only, so the kiyo-v4 weights (240 MB)
+are enough. It is best effort: a frame the detector misses for longer than a few frames stays uncensored, so check
+the result before relying on it.
 
 ## Desktop app
 

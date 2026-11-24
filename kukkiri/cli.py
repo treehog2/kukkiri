@@ -12,6 +12,7 @@ from kukkiri.weights import MODELS
 
 VIDEO_EXTS = {".mp4", ".mkv", ".mov", ".avi", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg", ".m4v", ".webm", ".flv"}
 SENSITIVITY = {"normal": 1.0, "high": 0.6, "low": 1.4}
+ADD_MOSAIC_THRESHOLD = 0.25
 LTX_MIN_VRAM_GB = 7.5
 LTX_VR_MIN_VRAM_GB = 30
 OUTPUT_TAG = ".kukkiri"
@@ -128,7 +129,7 @@ def _restore(args) -> int:
         src = videos[0]
         dst = Path(args.output) if args.output else src.with_name(f"{src.stem}{_tag(args)}.mp4")
         try:
-            return _restore_one(src, dst, args)
+            return (_add_mosaic_one if args.cmd == "add-mosaic" else _restore_one)(src, dst, args)
         except FFmpegError as e:
             print(f"failed: {src}: {e}", file=sys.stderr)
             return 1
@@ -145,13 +146,17 @@ def _restore(args) -> int:
         used.add(dst)
         print(f"[{i}/{len(videos)}] {src}", file=sys.stderr)
         try:
-            results[src] = "restored" if _restore_one(src, dst, args) == 0 else "declined"
+            one = _add_mosaic_one if args.cmd == "add-mosaic" else _restore_one
+            results[src] = "restored" if one(src, dst, args) == 0 else "declined"
         except Exception as e:
             print(f"\nfailed: {src}: {e!r}", file=sys.stderr)
             results[src] = "failed"
     counts = {k: sum(v == k for v in results.values()) for k in ("restored", "declined", "failed")}
-    print(f"batch done: {counts['restored']} restored, {counts['declined']} declined, {counts['failed']} failed",
-          file=sys.stderr)
+    if args.cmd == "add-mosaic":
+        print(f"batch done: {counts['restored']} mosaicked, {counts['failed']} failed", file=sys.stderr)
+    else:
+        print(f"batch done: {counts['restored']} restored, {counts['declined']} declined, {counts['failed']} failed",
+              file=sys.stderr)
     for src, r in results.items():
         if r != "restored":
             print(f"  {r}: {src}", file=sys.stderr)
@@ -159,10 +164,31 @@ def _restore(args) -> int:
 
 
 def _tag(args) -> str:
+    if args.cmd == "add-mosaic":
+        return f"{OUTPUT_TAG}-mosaic"
     tag = f"{OUTPUT_TAG}-{args.model}"
     if args.start or args.duration:
         tag += "." + "_".join(t.replace(":", "-") for t in (args.start or "0", args.duration) if t)
     return tag
+
+
+def _add_mosaic_one(src: Path, dst: Path, args) -> int:
+    import time
+
+    from kukkiri.add_mosaic import add_mosaic
+
+    if getattr(args, "_detector", None) is None:
+        from kukkiri.detector import CensorDetector, RFDETRSize
+        from kukkiri.weights import detector_checkpoint, detector_size, version_of
+
+        threshold = args.threshold if args.threshold is not None else ADD_MOSAIC_THRESHOLD * SENSITIVITY[args.sensitivity]
+        args._detector = CensorDetector(detector_checkpoint(Path(args.weights)), threshold=threshold,
+                                        size=RFDETRSize(detector_size(version_of(args.model))))
+    t0 = time.time()
+    done, n = add_mosaic(src, dst, args._detector, block=args.block, ffmpeg=args.ffmpeg,
+                     progress=lambda pct: print(f"\rmosaic: {pct:5.1f}%   ", end="", file=sys.stderr, flush=True))
+    print(f"\ndone: {dst} ({done} of {n} frames mosaicked, {time.time() - t0:.0f} s)", file=sys.stderr)
+    return 0
 
 
 def _restore_one(src: Path, dst: Path, args) -> int:
@@ -304,7 +330,7 @@ def _check(args) -> int:
 
 
 def main(argv: list[str] | None = None) -> None:
-    p = argparse.ArgumentParser(prog="kukkiri", description="Restore mosaic-censored video.")
+    p = argparse.ArgumentParser(prog="kukkiri", description="Restore mosaic-censored video, or add mosaics.")
     sub = p.add_subparsers(dest="cmd", required=True)
     r = sub.add_parser("restore", help="restore videos")
     r.add_argument("input", nargs="+", help="video files and/or folders (searched recursively)")
@@ -334,6 +360,21 @@ def main(argv: list[str] | None = None) -> None:
                    "each eye)")
     r.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
     r.add_argument("-v", "--verbose", action="store_true")
+    m = sub.add_parser("add-mosaic", help="add mosaics: a block mosaic over the bare genitals in videos")
+    m.add_argument("input", nargs="+", help="video files and/or folders (searched recursively)")
+    m.add_argument("-o", "--output", help="output mp4 for one input file, else an output folder "
+                   "(default: <name>.kukkiri-mosaic.mp4 next to each input)")
+    m.add_argument("--block", type=int, default=None, help="mosaic block size in pixels (default: frame height / 36)")
+    m.add_argument("--sensitivity", choices=list(SENSITIVITY), default="normal",
+                   help="how readily bare genitals are found: high misses fewer (and may mosaic a few things that are "
+                   "not), low mosaics fewer false finds (ignored with --threshold)")
+    m.add_argument("--threshold", type=float, default=None, help=f"detector score threshold (default: "
+                   f"{ADD_MOSAIC_THRESHOLD}, scaled by --sensitivity)")
+    m.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder); "
+                   "missing weights are downloaded on first use")
+    m.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
+    m.add_argument("-v", "--verbose", action="store_true")
+    m.set_defaults(model=None, start=None, duration=None, vr=None)
     d = sub.add_parser("download-weights", help="download and verify the model weights")
     d.add_argument("dest", nargs="?", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
     d.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
