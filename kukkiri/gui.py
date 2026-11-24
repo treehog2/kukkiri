@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -41,6 +42,7 @@ from PySide6.QtWidgets import (
 )
 
 _PROGRESS_RE = re.compile(r"^(\w+):\s+([\d.]+)%(?:, ([\d.]+) min left)?(?:, (\d+) fps)?")
+_LOG_NOISE_RE = re.compile(r"INVALID INDEX|Unable to load package|^nanobind:|^- (leaked|\.\.\. skipped)")
 _NOISE_RE = re.compile(r"WARN|Warning|^W\d{4} |\[TRT\] \[W\]|^PyNvVideoCodec:|Unable to import quantiz")
 COLS = ["File", "", "Section", "Status", "Progress", "Speed", "Time left"]
 _TRIM, _SECTION, _STATUS, _PROGRESS, _SPEED, _ETA = range(1, 7)
@@ -428,6 +430,7 @@ class MainWindow(QMainWindow):
         self.log.setMaximumBlockCount(2000)
         self.log.setFixedHeight(130)
         self._full_log: list[str] = []
+        self._log_stage, self._log_tick = None, 0.0
         log_label = QLabel()
         self.save_log_btn = QPushButton()
         self.save_log_btn.setFlat(True)
@@ -531,7 +534,11 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(tr(key))
 
     def _log_full(self, line: str) -> None:
-        self._full_log.append(line)
+        if _LOG_NOISE_RE.search(line):
+            return
+        from datetime import datetime
+
+        self._full_log.append(f"{datetime.now():%H:%M:%S} {line}")
         del self._full_log[:-20000]
 
     def _save_log(self) -> None:
@@ -709,6 +716,7 @@ class MainWindow(QMainWindow):
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read)
         self.proc.finished.connect(self._finished)
+        self._log_stage = None
         self._log_full(f"--- {job.src.name} -> {job.output}")
         self._log_full("$ kukkiri " + " ".join(args[2:] if args[:2] == ["-m", "kukkiri"] else args))
         self.log.appendPlainText(f"--- {job.src.name} -> {job.output}")
@@ -728,6 +736,10 @@ class MainWindow(QMainWindow):
                 self._log_full(line)
             if m:
                 stage, pct, eta, fps = m.group(1), float(m.group(2)), m.group(3), m.group(4)
+                now = time.monotonic()
+                if stage != self._log_stage or now - self._log_tick >= 30:
+                    self._log_stage, self._log_tick = stage, now
+                    self._log_full(line)
                 label = {"remaster": "Restoring", "remux": "Finishing", "preparing": "Preparing",
                          "download": "Downloading weights", "detect": "Finding mosaics",
                          "ltx": "Restoring with LTX"}.get(stage, stage)
