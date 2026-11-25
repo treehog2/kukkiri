@@ -104,7 +104,7 @@ def add_mosaic(src: str | Path, dst: str | Path, detector, block: int | None = N
                 progress(min(99.0, 50 + 50 * i / n))
 
     with tempfile.TemporaryDirectory(prefix="kukkiri_mosaic_", ignore_cleanup_errors=True) as tmp:
-        audio = extract_audio(src, Path(tmp) / "audio.mka")
+        audio = extract_audio(src, Path(tmp) / "audio.mka", ffmpeg)
         encode_frames(out_frames(), fps, dst, audio=audio, crf=16, ffmpeg=ffmpeg)
     if progress:
         progress(100.0)

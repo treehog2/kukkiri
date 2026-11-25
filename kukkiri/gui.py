@@ -42,8 +42,21 @@ from PySide6.QtWidgets import (
 )
 
 _PROGRESS_RE = re.compile(r"^(\w+):\s+([\d.]+)%(?:, ([\d.]+) min left)?(?:, (\d+) fps)?")
-_LOG_NOISE_RE = re.compile(r"INVALID INDEX|Unable to load package|^nanobind:|^- (leaked|\.\.\. skipped)")
+_LOG_NOISE_RE = re.compile(
+    r"INVALID INDEX|Unable to load package|^nanobind:|^- (leaked|\.\.\. skipped)"
+    r"|rf-detr - (Using a different number of positional encodings|Using patch size|Checkpoint has \d+ classes)"
+    r"|tensorrt\.plugin module is experimental|Unable to import quantiz|torch\._opaque_base is deprecated"
+    r"|register_opaque_type is deprecated|typ='reference' is deprecated|Not enough SMs to use max_autotune"
+)
 _NOISE_RE = re.compile(r"WARN|Warning|^W\d{4} |\[TRT\] \[W\]|^PyNvVideoCodec:|Unable to import quantiz")
+
+
+def split_progress(line: str) -> list[str]:
+    m = _PROGRESS_RE.match(line)
+    rest = line[m.end():].strip() if m else ""
+    return [line[:m.end()], rest] if rest else [line]
+
+
 COLS = ["File", "", "Section", "Status", "Progress", "Speed", "Time left"]
 _TRIM, _SECTION, _STATUS, _PROGRESS, _SPEED, _ETA = range(1, 7)
 
@@ -728,7 +741,7 @@ class MainWindow(QMainWindow):
         text = self._partial + bytes(self.proc.readAllStandardOutput()).decode(errors="replace")
         parts = re.split(r"[\r\n]", text)
         self._partial = parts.pop()
-        for line in (p.strip() for p in parts):
+        for line in (q for p in parts for q in split_progress(p.strip())):
             if not line:
                 continue
             m = _PROGRESS_RE.match(line)
@@ -754,7 +767,7 @@ class MainWindow(QMainWindow):
                 self._set(self.current, "Checking")
             elif line.startswith("cutting"):
                 self._set(self.current, "Cutting section")
-            if not _NOISE_RE.search(line):
+            if not _NOISE_RE.search(line) and not _LOG_NOISE_RE.search(line):
                 self.log.appendPlainText(line)
 
     def _finished(self, code: int, _status) -> None:

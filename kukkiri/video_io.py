@@ -74,9 +74,9 @@ def extract_frames(video: Path, frames_dir: Path) -> list[Path]:
     return sorted(frames_dir.glob(f"*{FRAME_EXT}"))
 
 
-def extract_audio(video: Path, audio_out: Path) -> Path | None:
+def extract_audio(video: Path, audio_out: Path, ffmpeg: str = "ffmpeg") -> Path | None:
     proc = subprocess.run(
-        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(video), "-vn", "-acodec", "copy", str(audio_out)],
+        [ffmpeg, "-y", "-loglevel", "error", "-i", str(video), "-vn", "-acodec", "copy", str(audio_out)],
         capture_output=True,
         text=True,
     )
@@ -160,9 +160,6 @@ def finish_decode(handle: dict) -> np.ndarray:
 
 
 def iter_frames(video: Path, ffmpeg: str = "ffmpeg", chunk: int = 16):
-    import fcntl
-    import os
-
     info = probe(video)
     w, h = int(info["width"]), int(info["height"])
     fsz = h * w * 3
@@ -173,10 +170,11 @@ def iter_frames(video: Path, ffmpeg: str = "ffmpeg", chunk: int = 16):
         bufsize=0,
     )
     assert proc.stdout is not None
-    fd = proc.stdout.fileno()
     try:
-        fcntl.fcntl(fd, 1031, 1 << 20)
-    except OSError:
+        import fcntl
+
+        fcntl.fcntl(proc.stdout.fileno(), 1031, 1 << 20)
+    except (ImportError, OSError):
         pass
     try:
         while True:
@@ -184,7 +182,7 @@ def iter_frames(video: Path, ffmpeg: str = "ffmpeg", chunk: int = 16):
             mv = memoryview(buf).cast("B")
             off, total = 0, buf.nbytes
             while off < total:
-                k = os.readv(fd, [mv[off:total]])
+                k = proc.stdout.readinto(mv[off:total])
                 if not k:
                     break
                 off += k

@@ -54,7 +54,7 @@ def flow_warp(x, flow, interpolation="bilinear", padding_mode="zeros", align_cor
     grid_flow = grid + flow
     gx = 2.0 * grid_flow[:, :, :, 0] / max(w - 1, 1) - 1.0
     gy = 2.0 * grid_flow[:, :, :, 1] / max(h - 1, 1) - 1.0
-    grid_flow = torch.stack((gx, gy), dim=3).type(x.type())
+    grid_flow = torch.stack((gx, gy), dim=3).to(x)
     return F.grid_sample(x, grid_flow, mode=interpolation, padding_mode=padding_mode, align_corners=align_corners)
 
 
