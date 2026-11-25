@@ -20,9 +20,12 @@ It also works the other way: [`kukkiri add-mosaic`](#add-mosaics) adds a block m
 
 ## Requirements
 
-- An NVIDIA GTX 16-series / RTX 20-series or newer GPU (compute capability 7.5+) and driver 580 or newer
+- An NVIDIA GTX 16-series / RTX 20-series or newer GPU (compute capability 7.5+) and driver 580 or newer, or an
+  [Apple Silicon Mac](#apple-silicon-experimental) (experimental)
 - Python 3.10+
 - `ffmpeg` on the `PATH`
+
+A 2-minute 720p film takes about 20 seconds with kiyo-v4 on a high-end GPU; smaller GPUs will be slower.
 
 ## Install
 
@@ -41,6 +44,22 @@ docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" kukkiri \
 
 The image pins the tested versions of the main dependencies, kiyo-ltx's included. Keep the weights directory mounted writable so the TensorRT
 engines built on the first run are reused.
+
+### Apple Silicon (experimental)
+
+On an Apple Silicon Mac (M1 or newer) kukkiri runs on the Apple GPU, from the command line:
+
+```
+brew install ffmpeg
+git clone https://github.com/treehog2/kukkiri && cd kukkiri
+python3 -m venv .venv && source .venv/bin/activate    # Python 3.10 or newer
+pip install .
+kukkiri restore input.mp4
+```
+
+- `restore` with kiyo-v4 and `add-mosaic` work; kiyo-ltx and VR need an NVIDIA GPU.
+- A 2-minute 720p film takes about 2 minutes on a high-end chip; smaller chips will be slower.
+- It uses about 3 GB of memory at 1080p and 9 GB at 4K; `--max-1080p` lowers that.
 
 ## Weights
 
@@ -71,10 +90,15 @@ fine-tuned to restore mosaics, for clearer detail on larger mosaics; small ones 
   15 GB it also runs in three passes (find the mosaics, restore the large ones with LTX, then the small ones and the
   video), so the models are never on the GPU together; it needs about 8 GB free, so close other GPU programs on an
   8 GB card. It stops with a message on less than 7.5 GB.
+  It also needs system memory (RAM): **32 GB recommended** on Windows with a GPU under 32 GB. With less than 24 GB of
+  RAM there it runs in the three passes too, which worked with 16 GB of RAM but left nothing free: close other
+  programs first; it may still run out.
   Cards older than the RTX 30 series (RTX 20, GTX 16) work too, but slowly: they lack bf16 support, so kiyo-ltx
   computes some steps in smaller pieces (about 90 s per 3 s of video on a T4 in our tests).
 - a **15 GB** download on first use (the folder `ltx-v1/` on Hugging Face)
 - a few minutes on the first run on a machine, to build its GPU kernels (cached in the weights folder afterwards)
+
+After that, a 10-second 1080p clip takes about 45 seconds on a high-end GPU, including loading the model.
 
 ```
 kukkiri restore input.mp4 --model kiyo-ltx-v1
@@ -130,6 +154,11 @@ gives smaller files.
 
 `--sensitivity high` also detects faint or small mosaics (at the risk of touching things that are not mosaics);
 `--sensitivity low` makes fewer false detections. The default, `normal`, suits most videos.
+
+`--full-frame` (kiyo-ltx only, not with `--vr`) redraws the whole picture instead of finding the mosaics, for mosaics
+that are not found otherwise (on objects, for example). It is slow and needs a high-VRAM GPU, so leave it off for
+ordinary censored video. It also redraws faces and areas without a mosaic. The result is generated, not recovered: do
+not use it to try to identify real people. A 5-second clip takes about 40 seconds on a high-end GPU.
 
 To restore many videos, pass several files and/or folders (folders are searched recursively) and an output folder:
 

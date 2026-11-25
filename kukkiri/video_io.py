@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import subprocess
+from fractions import Fraction
+import tempfile
 import threading
 from pathlib import Path
 
@@ -10,6 +12,15 @@ import numpy as np
 
 from kukkiri.errors import FFmpegError
 from kukkiri.constants import DEFAULT_CRF, FRAME_EXT
+
+
+ACCURATE = "flags=bicubic+accurate_rnd+full_chroma_int+full_chroma_inp"
+TO_BGR = f"scale=in_color_matrix=bt601:out_range=pc:{ACCURATE},format=bgr24"
+FROM_BGR = (f"scale=out_color_matrix=bt601:out_range=tv:{ACCURATE},format=yuv420p,"
+            "setparams=colorspace=unknown:color_primaries=unknown:color_trc=unknown")
+
+EVEN = "pad=ceil(iw/2)*2:ceil(ih/2)*2,"
+MP4_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
 
 def _run(cmd: list[str]) -> None:
@@ -159,14 +170,29 @@ def finish_decode(handle: dict) -> np.ndarray:
     return handle["result"]
 
 
+def upright(video: Path) -> tuple[int, int, Fraction]:
+    j = json.loads(subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+         "stream=width,height,r_frame_rate,avg_frame_rate:stream_tags=rotate:stream_side_data_list", "-of", "json", str(video)],
+        capture_output=True, text=True).stdout, strict=False)["streams"][0]
+    turn = [d["rotation"] for d in j.get("side_data_list", []) if "rotation" in d] + [j.get("tags", {}).get("rotate", 0)]
+    w, h = int(j["width"]), int(j["height"])
+    if round(float(turn[0])) % 180 == 90:
+        w, h = h, w
+    nominal, real = (Fraction(0) if j[k].endswith("/0") else Fraction(j[k]) for k in ("r_frame_rate", "avg_frame_rate"))
+    rate = nominal if real == 0 or abs(nominal - real) < real * Fraction(1, 200) else real.limit_denominator(1001)
+    return w, h, min(rate, Fraction(240))
+
+
 def iter_frames(video: Path, ffmpeg: str = "ffmpeg", chunk: int = 16):
-    info = probe(video)
-    w, h = int(info["width"]), int(info["height"])
+    w, h, rate = upright(video)
     fsz = h * w * 3
+    errors = tempfile.TemporaryFile()
     proc = subprocess.Popen(
-        [ffmpeg, "-loglevel", "error", "-i", str(video), "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+        [ffmpeg, "-loglevel", "error", "-nostdin", "-i", str(video), "-map", "0:v:0", "-vf", TO_BGR, "-vsync", "cfr", "-r",
+         str(rate), "-f", "rawvideo", "-"],
         stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stderr=errors,
         bufsize=0,
     )
     assert proc.stdout is not None
@@ -191,12 +217,15 @@ def iter_frames(video: Path, ffmpeg: str = "ffmpeg", chunk: int = 16):
                 yield buf[i]
             if n < chunk:
                 break
-        err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
         if proc.wait() != 0:
-            raise FFmpegError(err)
+            errors.seek(0)
+            raise FFmpegError(errors.read().decode(errors="replace")[-2000:])
     finally:
         if proc.poll() is None:
             proc.kill()
+        proc.stdout.close()
+        proc.wait()
+        errors.close()
 
 
 class FrameStore:
@@ -263,9 +292,10 @@ def decode_frames(video: Path, ffmpeg: str = "ffmpeg") -> np.ndarray:
 
 def encode_frames(
     frames,
-    fps: float,
+    fps: float | Fraction,
     out: Path,
     audio: Path | None = None,
+    duration: float | None = None,
     crf: int = DEFAULT_CRF,
     nvenc: bool = False,
     ffmpeg: str = "ffmpeg",
@@ -286,12 +316,18 @@ def encode_frames(
         "-s",
         f"{w}x{h}",
         "-r",
-        f"{fps:.6f}",
+        str(Fraction(fps).limit_denominator(1001)),
         "-i",
         "-",
     ]
     if audio is not None:
-        cmd += ["-i", str(audio), "-c:a", "copy", "-shortest"]
+        codec = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of",
+                                "csv=p=0", str(audio)], capture_output=True, text=True).stdout.strip()
+        cmd += ["-i", str(audio), "-map", "0:v:0", "-map", "1:a:0"]
+        cmd += ["-c:a", "copy"] if codec in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]
+    if duration:
+        cmd += ["-t", f"{duration:.6f}"]
+    cmd += ["-vf", EVEN + FROM_BGR]
     if nvenc:
         cmd += [
             "-c:v",
@@ -306,15 +342,24 @@ def encode_frames(
         ]
     else:
         cmd += ["-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-crf", str(crf), str(out)]
-    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    errors = tempfile.TemporaryFile()
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=errors)
     assert proc.stdin is not None
-    proc.stdin.write(np.ascontiguousarray(first).tobytes())
-    for f in it:
-        proc.stdin.write(np.ascontiguousarray(f).tobytes())
-    proc.stdin.close()
-    err = proc.stderr.read().decode(errors="replace") if proc.stderr else ""
-    if proc.wait() != 0:
-        raise FFmpegError(err)
+    try:
+        proc.stdin.write(np.ascontiguousarray(first).tobytes())
+        for f in it:
+            proc.stdin.write(np.ascontiguousarray(f).tobytes())
+        proc.stdin.close()
+    except OSError:
+        pass
+    except BaseException:
+        proc.kill()
+        proc.wait()
+        raise
+    rc = proc.wait()
+    errors.seek(0)
+    if rc != 0:
+        raise FFmpegError(f"ffmpeg could not write {Path(out).name} ({rc}): {errors.read().decode(errors='replace')[-2000:]}")
     return out
 
 

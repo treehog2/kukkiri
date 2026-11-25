@@ -15,7 +15,9 @@ from itertools import accumulate
 from pathlib import Path
 from typing import Callable
 
-from kukkiri.errors import SourceTruncated
+from kukkiri import device
+from kukkiri.device import Device
+from kukkiri.errors import FFmpegError, SourceTruncated
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ class RemasterConfig:
     max_fps: float | None = None
     vr: str | None = None
     vr_lens: str = "equirect"
+    full_frame: bool = False
 
 
 VR_MAX_BITRATE = 80_000_000
@@ -93,6 +96,17 @@ def _frame_budget() -> int:
 
 STAGED_SPANS = {"detect": (0.0, 15.0), "ltx": (15.0, 85.0), "remaster": (85.0, 100.0)}
 LTX_STAGED_GB = 15
+LTX_STAGED_RAM_GB = 24
+
+
+def _windows_ram_gb() -> float | None:
+    if os.name != "nt":
+        return None
+    import ctypes
+
+    kb = ctypes.c_ulonglong()
+    ok = ctypes.windll.kernel32.GetPhysicallyInstalledSystemMemory(ctypes.byref(kb))
+    return kb.value / 2**20 if ok else None
 
 
 def _ltx_staged() -> bool:
@@ -102,9 +116,11 @@ def _ltx_staged() -> bool:
     if env:
         return env == "1"
     gb = torch.cuda.get_device_properties(0).total_memory / 2**30
-    if gb < LTX_STAGED_GB:
+    ram = _windows_ram_gb()
+    short = ram is not None and ram < LTX_STAGED_RAM_GB and gb < LTX_LOW_VRAM_GB
+    if gb < LTX_STAGED_GB or short:
         os.environ.setdefault("KUKKIRI_FRAME_BUDGET_GB", "1.5")
-        logger.info(f"kiyo-ltx staged mode ({gb:.0f} GB GPU): detection, LTX and kiyo run as separate passes (slower)")
+        logger.info(f"kiyo-ltx staged mode ({gb:.0f} GB GPU{f', {ram:.0f} GB RAM' if short else ''}): detection, LTX and kiyo run as separate passes (slower)")
         return True
     return False
 
@@ -125,6 +141,12 @@ def _ltx_resident_blocks() -> int | None:
     return keep
 
 
+def _load_full_frame(weights_dir: Path):
+    from kukkiri.ltx import LtxRestorer
+
+    return LtxRestorer(weights_dir, compile=False, resident_blocks=_ltx_resident_blocks())
+
+
 def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch: int):
     from kukkiri.detector import CensorDetector, RFDETRSize
     from kukkiri.restorer import VideoRestorer
@@ -138,10 +160,11 @@ def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch
         if cur is None or os.path.abspath(cur) == os.path.abspath(default_cache_dir()):
             os.environ["TORCHINDUCTOR_CACHE_DIR"] = str(Path(weights_dir) / "inductor")
     det_dir = Path(weights_dir) / "vr" if cfg.vr else weights_dir
-    detector = CensorDetector(detector_checkpoint(det_dir), size=RFDETRSize(cfg.detector_size), threshold=threshold)
+    detector = CensorDetector(detector_checkpoint(det_dir), size=RFDETRSize(cfg.detector_size), threshold=threshold,
+                              device=device.pick().value)
     detector.fast = True
-    detector.trt = True
-    restorer = VideoRestorer(restorer_weights(weights_dir), device="cuda", trt_steps=True, engine_dir=weights_dir)
+    detector.trt = device.pick() is Device.CUDA
+    restorer = VideoRestorer(restorer_weights(weights_dir), device=device.pick().value, trt_steps=True, engine_dir=weights_dir)
     restorer.graph_batch = batch
     os.environ.setdefault("KUKKIRI_PRIMARY_BATCH", str(batch))
     if cfg.ltx:
@@ -199,10 +222,8 @@ def _produce_jobs(detector, frames, source, gap: int, min_length: int, stats: di
 
     th = threading.Thread(target=feed, daemon=True)
     th.start()
-    import torch
-
     try:
-        with torch.cuda.stream(torch.cuda.Stream()):
+        with device.cuda_stream():
             tk = GappedTracker(max_gap=gap, min_length=min_length)
             _detect_loop(detector, bq, tk, SpanEmitter(min_length=min_length), source, stats, cut_tv, vr, fisheye)
     except BaseException as e:
@@ -271,7 +292,8 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float, vr=None, fi
                 source_w[0] = batch[0].shape[1]
                 per_frame = detect_eyes(detector, batch, batch_size=32, fisheye=fisheye)
             else:
-                per_frame = detector.detect_frames(batch, batch_size=32)
+                with device.gpu_lock():
+                    per_frame = detector.detect_frames(batch, batch_size=32)
             for cut, dets in zip(cuts, per_frame):
                 dets = [d for d in dets if d.label in (MOSAIC_LABEL, FACE_LABEL)]
                 if fi >= len(source.pending):
@@ -347,6 +369,7 @@ def _remaster_once(
         SharedFrameStore,
         gpu_readable_source,
     )
+    from kukkiri.video_io_sw import FfmpegFrameStore, FfmpegVideoWriter
 
     t0 = time.time()
     cfg = config
@@ -371,12 +394,15 @@ def _remaster_once(
         max_bitrate = max(max_bitrate, VR_MAX_BITRATE)
     if progress:
         progress(ProgressEvent(0.0, "preparing", 0, n_frames))
-    detector, restorer = _load_models(weights_dir, cfg, threshold, batch)
+    if cfg.full_frame:
+        detector, restorer, ltx = None, None, _load_full_frame(weights_dir)
+    else:
+        detector, restorer = _load_models(weights_dir, cfg, threshold, batch)
     logger.info(
         f"remaster {src.name}: {n_frames} frames @ {fps:.3f} fps, {height}p, thr {threshold}, batch {batch}"
     )
     width = int(info.get("width") or 0)
-    if not cfg.vr and height >= 960 and width == 2 * height:
+    if not cfg.vr and not cfg.full_frame and height >= 960 and width == 2 * height:
         logger.warning(f"{src.name} looks like a side-by-side VR video: restore it with --vr sbs for VR's small "
                        "mosaics, adding --vr-lens fisheye for studios that pixelate the fisheye image (in the app: "
                        "Advanced, VR video)")
@@ -391,8 +417,14 @@ def _remaster_once(
         logger.info(f"{fps:.3f} fps source: restoring 1 frame in {stride} ({fps / stride:.3f} fps out)")
         fps, n_frames = fps / stride, -(-n_frames // stride)
     try:
-        frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget())
+        if device.pick() is Device.CUDA:
+            frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget())
+        else:
+            os.environ.setdefault("KUKKIRI_FRAME_BUDGET_GB", "2")
+            frames = FfmpegFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget(), ffmpeg=ffmpeg)
     except Exception as e:
+        if device.pick() is not Device.CUDA:
+            raise
         import PyNvVideoCodec as nvc
 
         shutil.rmtree(work, ignore_errors=True)
@@ -414,10 +446,15 @@ def _remaster_once(
     logger.info(f"encode: source {(input_bitrate or 0) / 1e6:.2f} Mbps -> cap {cap / 1e6 if cap else None} Mbps")
     dst.parent.mkdir(parents=True, exist_ok=True)
     mux = LiveMuxer(src, dst, fps, n_out / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg)
-    writer = GpuVideoWriter(
-        work / "video.mp4", frames.hw[1], frames.hw[0], fps, qp=qp, ffmpeg=ffmpeg, max_bitrate=cap, preset=cfg.preset,
-        stream=mux.stdin, idr_period=mux.idr_period(fps) if live_dir else None,
-    )
+    idr_period = mux.idr_period(fps) if live_dir else None
+    if device.pick() is Device.CUDA:
+        writer = GpuVideoWriter(
+            work / "video.mp4", frames.hw[1], frames.hw[0], fps, qp=qp, ffmpeg=ffmpeg, max_bitrate=cap, preset=cfg.preset,
+            stream=mux.stdin, idr_period=idr_period,
+        )
+    else:
+        writer = FfmpegVideoWriter(frames.hw[1], frames.hw[0], fps, qp, mux.stdin, max_bitrate=cap, idr_period=idr_period,
+                                   ffmpeg=ffmpeg)
     done = 0
     span = [0.0, 100.0]
     last = [0.0]
@@ -445,11 +482,16 @@ def _remaster_once(
                 progress(ProgressEvent(pct, "remaster", done, n_frames, eta))
 
     try:
-        if detector.trt and not hasattr(detector, "_trt_ctx"):
+        if detector and detector.trt and not hasattr(detector, "_trt_ctx"):
             detector._trt_init()
         pstats = {"n_frames": 0, "n_detections": 0, "n_tracks": 0, "tracks": []}
         fisheye = cfg.vr == "sbs" and cfg.vr_lens == "fisheye"
-        if getattr(restorer, "make_ltx", None) is not None:
+        if cfg.full_frame:
+            from kukkiri import full_frame
+
+            pstats["n_frames"] = full_frame.restore(frames, ltx, sink)
+            touched, source, producer = range(pstats["n_frames"]), None, None
+        elif getattr(restorer, "make_ltx", None) is not None:
             from kukkiri import staged
 
             span[:] = STAGED_SPANS["remaster"]
@@ -516,21 +558,25 @@ def _remaster_once(
                 target=_produce_jobs, args=(detector, frames, source, gap, min_length, pstats, cfg.cut_tv, cfg.vr,
                                             fisheye), daemon=True
             )
-        producer.start()
-        touched = restore_stream(source, frames, restorer, sink)
-        producer.join()
+        if producer:
+            producer.start()
+            touched = restore_stream(source, frames, restorer, sink)
+            producer.join()
         if "error" in pstats:
             raise pstats["error"]
         if n_frames and pstats["n_frames"] < n_frames - max(2, round(fps)):
             raise SourceTruncated(pstats["n_frames"], n_frames, fps)
         writer.close()
-    except BaseException:
+    except BaseException as e:
         logger.error(
             f"remaster failed after {done} frames written ({getattr(frames, 'decoded', '?')} decoded, "
             f"{n_frames} expected)"
         )
         writer.abort()
+        why = mux.failure()
         mux.kill()
+        if why and isinstance(e, (RuntimeError, OSError, FFmpegError)) and not isinstance(e, SourceTruncated):
+            raise RuntimeError(why) from e
         raise
     remaster_s = time.time() - t2
     n_frames = pstats["n_frames"]
@@ -540,7 +586,7 @@ def _remaster_once(
         tracks = [(off[min(s, len(repeats))], off[min(e, len(repeats))], a) for s, e, a in tracks]
     d = {
         **{k: v for k, v in pstats.items() if k != "tracks"},
-        "n_windows": source.n_jobs,
+        "n_windows": source.n_jobs if source else 0,
         "n_frames_touched": len(touched),
     }
     logger.info(f"remaster (detect + restore + encode): {remaster_s:.1f} s, {json.dumps(d)}")

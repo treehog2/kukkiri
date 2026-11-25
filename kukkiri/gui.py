@@ -13,7 +13,8 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, _seconds, collect_videos
 from kukkiri.constants import DISCORD_INVITES, HF_REPO, PUBLIC_REPO
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
-from kukkiri.weights import MODELS, default_dir, download_size, is_ltx, missing, version_of
+from kukkiri.weights import MODELS as ALL_MODELS
+from kukkiri.weights import default_dir, download_size, is_ltx, missing, version_of
 
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -40,6 +41,9 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+MAC = sys.platform == "darwin"
+MODELS = [m for m in ALL_MODELS if not (MAC and is_ltx(version_of(m)))]
 
 _PROGRESS_RE = re.compile(r"^(\w+):\s+([\d.]+)%(?:, ([\d.]+) min left)?(?:, (\d+) fps)?")
 _LOG_NOISE_RE = re.compile(
@@ -394,7 +398,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         for key, field in (("Model", self.model), ("Weights folder", self._with_browse(self.weights, "weights")),
                            ("Output folder", self._with_browse(self.outdir, "outdir")),
-                           ("Detection sensitivity", self.sensitivity), ("VR video", self.vr), ("", self.max_1080p),
+                           ("Detection sensitivity", self.sensitivity), *([] if MAC else [("VR video", self.vr)]), ("", self.max_1080p),
                            ("", self.skip_check),
                            ("", self.keep_fps)):
             label = QLabel()
@@ -713,7 +717,7 @@ class MainWindow(QMainWindow):
             args.append("--skip-check")
         if self.keep_fps.isChecked():
             args.append("--keep-fps")
-        if self.vr.currentData():
+        if self.vr.currentData() and not MAC:
             args += ["--vr", "sbs"] + (["--vr-lens", "fisheye"] if self.vr.currentData() == "sbs-fisheye" else [])
         if job.start:
             args += ["--start", job.start]
@@ -817,6 +821,8 @@ def main() -> None:
         import ctypes
 
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("kukkiri.app")
+    if MAC:
+        os.environ["PATH"] = os.pathsep.join([os.environ.get("PATH", ""), "/opt/homebrew/bin", "/usr/local/bin"])
     app = QApplication(sys.argv)
     app.setApplicationName("kukkiri")
     app.setWindowIcon(QIcon(str(Path(__file__).with_name("icon.png"))))

@@ -5,6 +5,7 @@ import os
 import numpy as np
 
 from kukkiri.constants import RESTORE_CROP_SIZE
+from kukkiri.device import cuda_record, cuda_stream, gpu_lock, on_stream
 from kukkiri.geometry import (
     CLIP,
     SEAM,
@@ -188,7 +189,7 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
         while nxt < source.frontier and pending[nxt] == 0:
             f = frames[nxt]
             if isinstance(f, torch.Tensor):
-                f.record_stream(torch.cuda.current_stream())
+                cuda_record(f)
             t0 = _time.time()
             with source.lock:
                 trs = by_frame.pop(nxt, ())
@@ -207,7 +208,7 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
     import threading
 
     refiner = getattr(restorer, "refiner", None)
-    device = getattr(restorer, "device", "cuda")
+    device = getattr(frames, "device", None) or getattr(restorer, "device", "cuda")
     q1: queue.Queue = queue.Queue(maxsize=2)
     q2: queue.Queue = queue.Queue(maxsize=2)
     err: list[BaseException] = []
@@ -236,9 +237,10 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
                         stream.synchronize()
                     scale = refiner.scale
                 else:
-                    with torch.cuda.stream(stream):
+                    with on_stream(stream):
                         restored = torch.from_numpy(restored).to(device)
-                        stream.synchronize()
+                        if stream is not None:
+                            stream.synchronize()
                 while not err:
                     try:
                         q2.put((tr, sp, wts, cc, restored, scale), timeout=5)
@@ -254,8 +256,7 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
 
     def tail_stage() -> None:
         try:
-            tail_stream = torch.cuda.Stream(priority=-1) if torch.cuda.is_available() else None
-            with torch.cuda.stream(tail_stream):
+            with cuda_stream(priority=-1):
                 while True:
                     t0 = _time.time()
                     try:
@@ -268,10 +269,11 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
                         continue
                     tstats["q2_wait"] += _time.time() - t0
                     if item is None or err:
-                        torch.cuda.current_stream().synchronize()
+                        if torch.cuda.is_available():
+                            torch.cuda.current_stream().synchronize()
                         return
                     tr, sp, wts, cc, restored, scale = item
-                    restored.record_stream(torch.cuda.current_stream())
+                    cuda_record(restored)
                     t0 = _time.time()
                     _accumulate_job_gpu(tr, sp, wts, cc, restored, scale, acc)
                     tstats["accumulate"] += _time.time() - t0
@@ -338,10 +340,11 @@ def restore_stream(source: JobSource, frames, restorer, sink) -> set[int]:
             for k in small:
                 _, tr, sp, _ = group[k]
                 ccs[k] = _bcc(tr, sp, frames, CANVAS_SIZE)
-            if hasattr(restorer, "restore_canvases"):
-                res = restorer.restore_canvases([ccs[k].crops for k in small])
-            else:
-                res = [restorer.restore_canvas(ccs[k].crops) for k in small]
+            with gpu_lock():
+                if hasattr(restorer, "restore_canvases"):
+                    res = restorer.restore_canvases([ccs[k].crops for k in small])
+                else:
+                    res = [restorer.restore_canvas(ccs[k].crops) for k in small]
             for k, r in zip(small, res):
                 outs[k] = r
         for k in (k for k, t in enumerate(to_ltx) if t):

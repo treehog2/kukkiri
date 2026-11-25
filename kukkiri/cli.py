@@ -6,6 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from kukkiri.device import Device, env_problem, pick
 from kukkiri.errors import FFmpegError
 from kukkiri.weights import MODELS
 
@@ -57,6 +58,8 @@ def _windows_nvidia_adapters() -> list[tuple[str, float]] | None:
 def _gpu_problem() -> str | None:
     import torch
 
+    if pick() is not Device.CUDA:
+        return None
     if not torch.cuda.is_available():
         need = "kukkiri needs an NVIDIA GTX 16-series / RTX 20-series or newer GPU and driver 580 or newer."
         found = _windows_nvidia_adapters() if sys.platform == "win32" else None
@@ -89,6 +92,10 @@ def _restore(args) -> int:
     args.model = f"kiyo-{version}"
     from kukkiri.weights import is_ltx
 
+    if pick() is not Device.CUDA and (is_ltx(version) or getattr(args, "vr", None)):
+        print(f"error: {'VR' if getattr(args, 'vr', None) else args.model} needs an NVIDIA GPU for now; use {MODELS[0]} "
+              "without --vr on this machine", file=sys.stderr)
+        return 1
     if is_ltx(version):
         import torch
 
@@ -102,6 +109,9 @@ def _restore(args) -> int:
                   f"({torch.cuda.get_device_name()} has {gb:.0f} GB: two 4K eyes do not fit next to the model yet); "
                   f"restore VR with {MODELS[0]} instead", file=sys.stderr)
             return 1
+    if args.full_frame and (not is_ltx(version) or getattr(args, "vr", None)):
+        print("error: --full-frame needs --model kiyo-ltx-v1, and does not work with --vr", file=sys.stderr)
+        return 1
     weights = Path(args.weights) if args.weights else default_dir(version)
     if missing(weights, version):
         print(f"downloading the {args.model} model weights into {weights}", file=sys.stderr)
@@ -130,8 +140,8 @@ def _restore(args) -> int:
         dst = Path(args.output) if args.output else src.with_name(f"{src.stem}{_tag(args)}.mp4")
         try:
             return (_add_mosaic_one if args.cmd == "add-mosaic" else _restore_one)(src, dst, args)
-        except FFmpegError as e:
-            print(f"failed: {src}: {e}", file=sys.stderr)
+        except (FFmpegError, MemoryError) as e:
+            print(f"failed: {src}: {e or 'out of memory'}", file=sys.stderr)
             return 1
     outdir = Path(args.output) if args.output else None
     if outdir:
@@ -182,7 +192,7 @@ def _add_mosaic_one(src: Path, dst: Path, args) -> int:
         from kukkiri.weights import detector_checkpoint, detector_size, version_of
 
         threshold = args.threshold if args.threshold is not None else ADD_MOSAIC_THRESHOLD * SENSITIVITY[args.sensitivity]
-        args._detector = CensorDetector(detector_checkpoint(Path(args.weights)), threshold=threshold,
+        args._detector = CensorDetector(detector_checkpoint(Path(args.weights)), threshold=threshold, device=pick().value,
                                         size=RFDETRSize(detector_size(version_of(args.model))))
     t0 = time.time()
     done, n = add_mosaic(src, dst, args._detector, block=args.block, ffmpeg=args.ffmpeg,
@@ -206,7 +216,7 @@ def _restore_one(src: Path, dst: Path, args) -> int:
             print(f"cutting {args.start or '0'} {until}", file=sys.stderr)
             section = cut_section(src, Path(tmp) / "section.mp4", start, duration, ffmpeg=args.ffmpeg)
             return _run_remaster(remaster, section, dst, weights, args)
-    if not args.skip_check:
+    if not args.skip_check and not args.full_frame:
         from kukkiri.weights import detector_size, version_of
 
         scan = scan_keyframes(src, detector_checkpoint(weights), ffmpeg=args.ffmpeg, size=detector_size(version_of(args.model)))
@@ -242,20 +252,36 @@ def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
                          max_pixels=1920 * 1088 if args.max_1080p else None,
                          threshold_scale=SENSITIVITY[args.sensitivity],
                          ltx=is_ltx(version), max_fps=0.0 if args.keep_fps else None, vr=getattr(args, "vr", None),
-                         vr_lens=getattr(args, "vr_lens", "equirect"))
+                         vr_lens=getattr(args, "vr_lens", "equirect"), full_frame=args.full_frame)
     existed = Path(dst).exists()
     try:
         r = remaster(src, dst, weights, config=cfg, threshold=args.threshold, ffmpeg=args.ffmpeg, progress=progress)
-    except BaseException:
+    except BaseException as e:
         if not existed:
             Path(dst).unlink(missing_ok=True)
+        if _out_of_ram(e):
+            raise MemoryError("kukkiri ran out of system memory (RAM and page file). Close other programs, enlarge the "
+                              "page file, or use kiyo-v4") from e
         raise
     print(f"\ndone: {r.output} ({r.frames_touched} of {r.frames} frames restored, {r.total_s:.0f} s)", file=sys.stderr)
+    if not r.frames_touched:
+        print("no mosaics found, so the video is unchanged. If it has one, try --sensitivity high, or --full-frame "
+              "(kiyo-ltx only; redraws the whole picture, needs a high-VRAM GPU)", file=sys.stderr)
     if args.previews:
         from kukkiri.preview import make_previews
 
         make_previews(src, Path(r.output), r, ffmpeg=args.ffmpeg, log=lambda m: print(m, file=sys.stderr))
     return 0
+
+
+def _out_of_ram(e: BaseException) -> bool:
+    import torch
+
+    if sys.platform != "win32":
+        return False
+    if "cuMemHostAlloc" in str(e):
+        return True
+    return isinstance(e, torch.OutOfMemoryError) and torch.cuda.mem_get_info()[0] > 2 * 2**30
 
 
 def _check(args) -> int:
@@ -275,7 +301,10 @@ def _check(args) -> int:
     problem = _gpu_problem()
     import torch
 
-    if problem:
+    nvidia = pick() is Device.CUDA
+    if not nvidia:
+        emit("Graphics card", "ok", "{name}", name={Device.MPS: "Apple GPU", Device.CPU: "CPU"}[pick()])
+    elif problem:
         if not torch.cuda.is_available():
             emit("Graphics card", "fail", "no NVIDIA GPU found")
         else:
@@ -296,7 +325,7 @@ def _check(args) -> int:
         old = float(".".join(str(driver).split(".")[:2])) < 580
         emit("NVIDIA driver", "fail" if old else "ok",
              "{version}: update to 580 or newer (nvidia.com/drivers)" if old else "{version}", version=driver)
-    if not problem:
+    if nvidia and not problem:
         free, total = (b / 1e9 for b in torch.cuda.mem_get_info())
         busy = free < 2.0
         emit("GPU memory", "warn" if busy else "ok",
@@ -323,9 +352,10 @@ def _check(args) -> int:
         emit("ffmpeg", "ok", "{version}", version=out[2] if len(out) > 2 else ff)
     else:
         emit("ffmpeg", "fail", "not found")
-    prepared = any(weights.glob("export_*/*.engine")) and any(weights.glob("primary_steps/*.ep"))
-    emit("GPU preparation", "ok" if prepared else "info",
-         "done" if prepared else "not yet: the first restore takes 10 to 20 minutes longer")
+    if nvidia:
+        prepared = any(weights.glob("export_*/*.engine")) and any(weights.glob("primary_steps/*.ep"))
+        emit("GPU preparation", "ok" if prepared else "info",
+             "done" if prepared else "not yet: the first restore takes 10 to 20 minutes longer")
     return 0
 
 
@@ -352,6 +382,9 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--max-1080p", action="store_true", help="serve sources above 1080p at 1080p (faster, smaller)")
     r.add_argument("--keep-fps", action="store_true", help="kiyo-ltx: keep sources above 30 fps at their full frame "
                    "rate (about twice as slow; by default they are restored at 30 fps)")
+    r.add_argument("--full-frame", action="store_true", help="kiyo-ltx: redraw the whole picture instead of finding the "
+                   "mosaics, for mosaics that are not found otherwise. Slow, needs a high-VRAM GPU, and "
+                   "also redraws faces and areas without a mosaic; leave it off for ordinary censored video")
     r.add_argument("--vr", choices=["sbs"], help="VR180 video layout: sbs = side-by-side eyes; the VR detector is "
                    "downloaded on first use")
     r.add_argument("--vr-lens", choices=["equirect", "fisheye"], default="equirect",
@@ -384,6 +417,10 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
     c.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
     args = p.parse_args(argv)
+    problem = env_problem()
+    if problem:
+        print(f"error: {problem}", file=sys.stderr)
+        sys.exit(1)
     if args.cmd == "check":
         sys.exit(_check(args))
     if args.cmd == "download-weights":
@@ -403,6 +440,10 @@ def main(argv: list[str] | None = None) -> None:
     except (SystemExit, Exception, KeyboardInterrupt) as e:
         if isinstance(e, SystemExit):
             raise
+        if isinstance(e, FileNotFoundError) and Path(str(e.filename)).name in ("ffmpeg", "ffprobe"):
+            hint = " (brew install ffmpeg)" if sys.platform == "darwin" else ""
+            print(f"error: {Path(e.filename).name} was not found: install ffmpeg{hint}", file=sys.stderr)
+            sys.exit(1)
         import os
         import traceback
 

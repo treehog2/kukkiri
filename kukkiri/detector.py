@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -8,6 +9,7 @@ import numpy as np
 
 from kukkiri import trt_compat
 from kukkiri.constants import DETECT_BATCH_SIZE, DETECT_CONF_THRESHOLD
+from kukkiri.device import Device
 
 
 class RFDETRSize(str, Enum):
@@ -18,6 +20,29 @@ class RFDETRSize(str, Enum):
     LARGE = "large"
     SEG_SMALL = "seg_small"
     SEG_MEDIUM = "seg_medium"
+
+
+logger = logging.getLogger(__name__)
+
+MPS_BATCH = 8
+
+
+def _native_grid_sample() -> None:
+    import sys
+
+    import torch.nn.functional as F
+    from rfdetr.utilities import tensors
+
+    gathers = getattr(tensors, "_bilinear_grid_sample", None)
+    if gathers is None:
+        return
+
+    def native(input, grid, padding_mode="zeros", align_corners=False):
+        return F.grid_sample(input, grid, mode="bilinear", padding_mode=padding_mode, align_corners=align_corners)
+
+    for name, module in list(sys.modules.items()):
+        if name.startswith("rfdetr") and getattr(module, "_bilinear_grid_sample", None) is gathers:
+            module._bilinear_grid_sample = native
 
 
 @dataclass
@@ -214,7 +239,15 @@ class CensorDetector:
         if not getattr(self, "_warm", False):
             m.predict(np.zeros((1080, 1920, 3), np.uint8), threshold=self.threshold, include_source_image=False)
             self._warm = True
+            if m.model.device.type == Device.MPS.value:
+                try:
+                    m.model.model.export()
+                    _native_grid_sample()
+                except (AttributeError, ImportError) as e:
+                    logger.warning(f"detector speedups not applied: {e!r}")
         net, pp, dev = m.model.model, m.model.postprocess, m.model.device
+        if dev.type == Device.MPS.value:
+            batch_size = min(batch_size, MPS_BATCH)
         res = int(m.model.resolution)
         mean = torch.tensor(m.means, device=dev).view(1, 3, 1, 1)
         std = torch.tensor(m.stds, device=dev).view(1, 3, 1, 1)

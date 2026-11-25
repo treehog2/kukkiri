@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from fractions import Fraction
 from pathlib import Path
 
@@ -11,7 +12,10 @@ HLS_TIME = SEGMENT_S - 0.1
 
 def exact_frame_times(fps: float) -> tuple[str, list[str]]:
     r = Fraction(fps).limit_denominator(1001)
-    return f"{r.numerator}/{r.denominator}", ["-bsf:v", f"setts=ts=N*{r.denominator}/({r.numerator}*TB)"]
+    setts = f"setts=ts=N*{r.denominator}/({r.numerator}*TB)"
+    if sys.platform == "darwin":
+        setts += f":duration={r.denominator}/({r.numerator}*TB)"
+    return f"{r.numerator}/{r.denominator}", ["-bsf:v", setts]
 
 
 class LiveMuxer:
@@ -96,6 +100,11 @@ class LiveMuxer:
         if self.proc.returncode != 0:
             raise RuntimeError(f"ffmpeg mux failed ({self.proc.returncode}): {err.decode(errors='replace')[-2000:]}")
         self._playlist_dirty = True
+
+    def failure(self) -> str | None:
+        if self.proc.poll() in (None, 0):
+            return None
+        return f"ffmpeg mux failed ({self.proc.returncode}): {self.proc.stderr.read().decode(errors='replace')[-2000:]}"
 
     def kill(self) -> None:
         if self.proc.poll() is None:

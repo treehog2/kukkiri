@@ -53,7 +53,7 @@ class VideoRestorer:
         engine_dir: str | Path | None = None,
     ):
         self.device = device
-        self.fp16 = fp16 and device.startswith("cuda")
+        self.fp16 = fp16 and device.startswith(("cuda", "mps"))
         self.net = _load_generator(Path(weights), device)
         if self.fp16:
             self.net = self.net.half()

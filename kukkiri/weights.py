@@ -70,6 +70,7 @@ def onnx_name(version: str = VERSION) -> str:
     return RELEASES[version][1]["detector-b32-fp16.onnx"][0]
 
 
+NEEDS_ONNX = sys.platform != "darwin"
 ONNX = onnx_name()
 FILES = files()
 
@@ -99,6 +100,8 @@ def _sha256(path: Path) -> str:
 def verify(dest: Path, version: str = VERSION) -> list[str]:
     bad = []
     for name, (local, size, sha) in files(version).items():
+        if local == onnx_name(version) and not NEEDS_ONNX:
+            continue
         p = Path(dest) / local
         if not p.is_file() or p.stat().st_size != size or _sha256(p) != sha:
             bad.append(name)
@@ -144,7 +147,7 @@ def missing(weights_dir: Path, version: str = VERSION) -> list[str]:
     d = Path(weights_dir)
     out = []
     release = (d / "detector.safetensors").is_file() and (d / "detector.json").is_file()
-    if release and not (d / onnx_name(version)).is_file():
+    if release and NEEDS_ONNX and not (d / onnx_name(version)).is_file():
         out.append("detector")
     elif not ((d / "detector.pth").is_file() or release):
         out.append("detector")

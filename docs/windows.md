@@ -9,6 +9,7 @@ install anything else apart from an up-to-date NVIDIA driver.
 - An NVIDIA GTX 16-series / RTX 20-series or newer GPU, with driver 580 or newer
   ([nvidia.com/drivers](https://www.nvidia.com/drivers))
 - About 6 GB of free disk space, plus room for the restored videos
+- For kiyo-ltx on a GPU with less than 32 GB of memory: 32 GB of RAM recommended (16 GB can work, slowly, with other programs closed)
 
 ## Install
 

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
+from kukkiri.device import pick
 from kukkiri.errors import AlreadyRemasteredError, NotRemasterableError
 from kukkiri.video_io import probe
 
@@ -122,12 +123,12 @@ def _keyframes(video: Path, ffmpeg: str, slices: int = GATE_SLICES):
             p.wait()
 
 
-def scan_keyframes(video: Path, detector_weights: Path, ffmpeg: str = "ffmpeg", device: str = "cuda",
+def scan_keyframes(video: Path, detector_weights: Path, ffmpeg: str = "ffmpeg", device: str | None = None,
                    size: str = "seg_medium") -> RestorableScan:
     from kukkiri.detector import CensorDetector, RFDETRSize
 
     t0 = time.time()
-    det = CensorDetector(detector_weights, size=RFDETRSize(size), threshold=GATE_THRESHOLD, device=device)
+    det = CensorDetector(detector_weights, size=RFDETRSize(size), threshold=GATE_THRESHOLD, device=device or pick().value)
     kept: list[tuple[bool, bool]] = []
     stride = 1
     seen = 0

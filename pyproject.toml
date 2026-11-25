@@ -13,14 +13,15 @@ requires-python = ">=3.10"
 dependencies = [
     "torch>=2.8",
     "torchvision>=0.23",
+    "torchvision>=0.29; sys_platform == 'darwin'",  # deformable convolution on the Apple GPU
     "numpy>=1.26",
     "opencv-python-headless>=4.10",
     "rfdetr>=1.10",
-    "PyNvVideoCodec>=2.0",
-    "tensorrt>=10",
-    "torch-tensorrt>=2.8",
-    "onnx>=1.16",
-    "onnxconverter-common>=1.14",
+    "PyNvVideoCodec>=2.0; sys_platform != 'darwin'",
+    "tensorrt>=10; sys_platform != 'darwin'",
+    "torch-tensorrt>=2.8; sys_platform != 'darwin'",
+    "onnx>=1.16; sys_platform != 'darwin'",
+    "onnxconverter-common>=1.14; sys_platform != 'darwin'",
     "safetensors>=0.4",
 ]
 

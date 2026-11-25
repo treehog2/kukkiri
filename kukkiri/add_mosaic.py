@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import tempfile
+from fractions import Fraction
 from pathlib import Path
 
 import cv2
@@ -54,12 +55,12 @@ def _batches(src: Path, ffmpeg: str, batch: int):
 
 def add_mosaic(src: str | Path, dst: str | Path, detector, block: int | None = None, hold: int = 6, ffmpeg: str = "ffmpeg",
            batch: int = 16, progress=None) -> tuple[int, int]:
-    from kukkiri.video_io import encode_frames, extract_audio, probe
+    from kukkiri.video_io import encode_frames, extract_audio, probe, upright
 
     src, dst = Path(src), Path(dst)
     info = probe(src)
-    h, w = info["height"], info["width"]
-    expected = info["nb_frames"] or round(info["fps"] * info["duration"])
+    w, h, fps = upright(src)
+    expected = round(fps * Fraction(info["duration"]))
     block = block or max(8, round(h / 36))
 
     grids: dict[int, np.ndarray] = {}
@@ -74,9 +75,6 @@ def add_mosaic(src: str | Path, dst: str | Path, detector, block: int | None = N
             progress(min(49.0, 50 * n / expected))
     if not n:
         raise RuntimeError(f"no frames could be read from {src}")
-    fps = info["fps"]
-    if info["duration"] and abs(n / info["duration"] - fps) > 0.02 * fps:
-        fps = n / info["duration"]
     found = sorted(grids)
 
     def grid_for(i: int, j: list[int]) -> np.ndarray | None:
@@ -105,7 +103,7 @@ def add_mosaic(src: str | Path, dst: str | Path, detector, block: int | None = N
 
     with tempfile.TemporaryDirectory(prefix="kukkiri_mosaic_", ignore_cleanup_errors=True) as tmp:
         audio = extract_audio(src, Path(tmp) / "audio.mka", ffmpeg)
-        encode_frames(out_frames(), fps, dst, audio=audio, crf=16, ffmpeg=ffmpeg)
+        encode_frames(out_frames(), fps, dst, audio=audio, duration=float(n / fps), crf=16, ffmpeg=ffmpeg)
     if progress:
         progress(100.0)
     return done, n

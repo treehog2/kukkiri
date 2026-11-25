@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import gc
 import json
+import logging
 from pathlib import Path
 
 import numpy as np
 import torch
 from safetensors.torch import load_file
+
+logger = logging.getLogger(__name__)
 
 PREFIX = "model.diffusion_model."
 SIGMAS = (1.0, 0.725, 0.0)
@@ -47,8 +50,40 @@ def _header(f) -> tuple[dict, dict, int]:
     return header, header.pop("__metadata__", None) or {}, 8 + n
 
 
+class _HostPark:
+
+    RESERVE = 3 * 2**29
+
+    def __init__(self) -> None:
+        self.pin, self.bytes, self.reserve = True, 0, None
+
+    def __call__(self, t: torch.Tensor) -> torch.Tensor:
+        if not self.pin:
+            return t
+        try:
+            if self.reserve is None:
+                self.reserve = torch.empty(self.RESERVE, dtype=torch.uint8).pin_memory()
+            pinned = t.pin_memory()
+            self.bytes += t.nbytes
+            return pinned
+        except RuntimeError as e:
+            self.pin = False
+            self.release()
+            try:
+                torch.zeros(1, device="cuda").add_(1)
+            except RuntimeError:
+                pass
+            logger.warning(f"kiyo-ltx: no more pinned memory after {self.bytes / 2**30:.1f} GB, the rest uses ordinary "
+                           f"memory (slower): {str(e).splitlines()[0]}")
+            return t
+
+    def release(self) -> None:
+        self.reserve = None
+        torch._C._host_emptyCache()
+
+
 def _read_to_device(path: Path, device: torch.device, on_host=lambda name: False) -> dict[str, torch.Tensor]:
-    out = {}
+    out, park = {}, _HostPark()
     with open(path, "rb") as f:
         header, _, base = _header(f)
         for name, info in sorted(header.items(), key=lambda kv: kv[1]["data_offsets"][0]):
@@ -57,15 +92,17 @@ def _read_to_device(path: Path, device: torch.device, on_host=lambda name: False
             buf = bytearray(f.read(b - a))
             t = torch.frombuffer(buf, dtype=_DTYPES[info["dtype"]]) if b > a else torch.empty(0, dtype=_DTYPES[info["dtype"]])
             t = t.reshape(info["shape"])
-            out[name] = t.pin_memory() if on_host(name) else t.to(device)
+            out[name] = park(t) if on_host(name) else t.to(device)
             del buf, t
+    park.release()
     return out
 
 
 def _stream_blocks(blocks: torch.nn.ModuleList, keep: int, device: torch.device) -> None:
+    park = _HostPark()
     for block in list(blocks)[keep:]:
         tensors = list(block.parameters()) + list(block.buffers())
-        parked = [(t, t.data if t.device.type == "cpu" else t.data.to("cpu").pin_memory()) for t in tensors]
+        parked = [(t, t.data if t.device.type == "cpu" else park(t.data.to("cpu"))) for t in tensors]
         for t, cpu in parked:
             t.data = cpu
 
@@ -79,6 +116,7 @@ def _stream_blocks(blocks: torch.nn.ModuleList, keep: int, device: torch.device)
 
         block.register_forward_pre_hook(load)
         block.register_forward_hook(unload)
+    park.release()
     torch.cuda.empty_cache()
 
 
@@ -165,7 +203,11 @@ class LtxRestorer:
         older = torch.cuda.get_device_capability(self.device)[0] < 8
         self.vae_dtype = torch.float16 if older else self.dtype
         self.context = load_file(str(prompt))["video_encoding"].to(self.device, self.dtype)
-        self.model = _load_transformer(tr, self.device, resident_blocks)
+        try:
+            self.model = _load_transformer(tr, self.device, resident_blocks)
+        except MemoryError as e:
+            raise MemoryError("kiyo-ltx ran out of system memory: on this GPU it keeps part of the model in RAM (up to about "
+                              "12 GB). Close other programs, or use kiyo-v4") from e
         self.encoder = ImageConditioner(str(vae), self.vae_dtype, self.device)._encoder_builder.build(
             device=self.device, dtype=self.vae_dtype
         ).eval()
@@ -204,6 +246,7 @@ class LtxRestorer:
                 setattr(self, k, None)
             gc.collect()
             torch.cuda.empty_cache()
+            torch._C._host_emptyCache()
             self.__init__(self.weights_dir, str(self.device), compile=False, resident_blocks=self.resident_blocks)
             self.restore_canvas(np.zeros((n_frames, self.canvas, self.canvas, 3), np.uint8))
         torch.cuda.synchronize()
