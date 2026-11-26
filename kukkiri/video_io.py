@@ -12,6 +12,7 @@ import numpy as np
 
 from kukkiri.errors import FFmpegError
 from kukkiri.constants import DEFAULT_CRF, FRAME_EXT
+from kukkiri.tools import tool
 
 
 ACCURATE = "flags=bicubic+accurate_rnd+full_chroma_int+full_chroma_inp"
@@ -23,6 +24,7 @@ EVEN = "pad=ceil(iw/2)*2:ceil(ih/2)*2,"
 MP4_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 
 
+
 def _run(cmd: list[str]) -> None:
     proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
@@ -32,7 +34,7 @@ def _run(cmd: list[str]) -> None:
 def probe(video: Path) -> dict:
     proc = subprocess.run(
         [
-            "ffprobe",
+            tool("ffprobe"),
             "-v",
             "error",
             "-select_streams",
@@ -65,7 +67,7 @@ def frame_repeats(video: Path, fps: float, n_frames: int, duration: float) -> li
     if not (fps and n_frames and duration) or abs(n_frames - duration * fps) <= fps / 2:
         return None
     proc = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0",
+        [tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries", "packet=pts_time", "-of", "csv=p=0",
          str(video)],
         capture_output=True, text=True, check=True,
     )
@@ -172,7 +174,7 @@ def finish_decode(handle: dict) -> np.ndarray:
 
 def upright(video: Path) -> tuple[int, int, Fraction]:
     j = json.loads(subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
+        [tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-show_entries",
          "stream=width,height,r_frame_rate,avg_frame_rate:stream_tags=rotate:stream_side_data_list", "-of", "json", str(video)],
         capture_output=True, text=True).stdout, strict=False)["streams"][0]
     turn = [d["rotation"] for d in j.get("side_data_list", []) if "rotation" in d] + [j.get("tags", {}).get("rotate", 0)]
@@ -321,7 +323,7 @@ def encode_frames(
         "-",
     ]
     if audio is not None:
-        codec = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of",
+        codec = subprocess.run([tool("ffprobe"), "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=codec_name", "-of",
                                 "csv=p=0", str(audio)], capture_output=True, text=True).stdout.strip()
         cmd += ["-i", str(audio), "-map", "0:v:0", "-map", "1:a:0"]
         cmd += ["-c:a", "copy"] if codec in MP4_AUDIO else ["-c:a", "aac", "-b:a", "192k"]

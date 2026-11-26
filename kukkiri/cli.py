@@ -4,10 +4,12 @@ import argparse
 import logging
 import sys
 import tempfile
+import traceback
 from pathlib import Path
 
 from kukkiri.device import Device, env_problem, pick
 from kukkiri.errors import FFmpegError
+from kukkiri.tools import tool
 from kukkiri.weights import MODELS
 
 
@@ -391,7 +393,7 @@ def main(argv: list[str] | None = None) -> None:
                    help="with --vr, the image the studio pixelated: equirect (default), or fisheye for studios whose "
                    "mosaic was pixelated in the camera's fisheye image (its blocks bend into fans near the bottom of "
                    "each eye)")
-    r.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
+    r.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
     r.add_argument("-v", "--verbose", action="store_true")
     m = sub.add_parser("add-mosaic", help="add mosaics: a block mosaic over the bare genitals in videos")
     m.add_argument("input", nargs="+", help="video files and/or folders (searched recursively)")
@@ -405,7 +407,7 @@ def main(argv: list[str] | None = None) -> None:
                    f"{ADD_MOSAIC_THRESHOLD}, scaled by --sensitivity)")
     m.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder); "
                    "missing weights are downloaded on first use")
-    m.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
+    m.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
     m.add_argument("-v", "--verbose", action="store_true")
     m.set_defaults(model=None, start=None, duration=None, vr=None)
     d = sub.add_parser("download-weights", help="download and verify the model weights")
@@ -415,7 +417,7 @@ def main(argv: list[str] | None = None) -> None:
     c = sub.add_parser("check", help="check this machine: GPU, driver, memory, disk, model files, ffmpeg")
     c.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
     c.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
-    c.add_argument("--ffmpeg", default="ffmpeg", help="ffmpeg binary")
+    c.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
     args = p.parse_args(argv)
     problem = env_problem()
     if problem:
@@ -440,6 +442,10 @@ def main(argv: list[str] | None = None) -> None:
     except (SystemExit, Exception, KeyboardInterrupt) as e:
         if isinstance(e, SystemExit):
             raise
+        if isinstance(e, PermissionError) and any(f.name == "_execute_child" for f in traceback.extract_tb(e.__traceback__)):
+            print(f"error: Windows refused to start a program kukkiri needs ({e}). Your antivirus may be blocking ffmpeg "
+                  "or ffprobe: check its quarantine, or add the kukkiri folder as an exception", file=sys.stderr)
+            sys.exit(1)
         if isinstance(e, FileNotFoundError) and Path(str(e.filename)).name in ("ffmpeg", "ffprobe"):
             hint = " (brew install ffmpeg)" if sys.platform == "darwin" else ""
             print(f"error: {Path(e.filename).name} was not found: install ffmpeg{hint}", file=sys.stderr)

@@ -11,6 +11,7 @@ from pathlib import Path
 import torch
 
 from kukkiri.errors import FFmpegError
+from kukkiri.tools import tool
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ MUXABLE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
 def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     out = Path(out_dir) / "source_repaired.mp4"
     streams = subprocess.run(
-        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
+        [tool("ffprobe"), "-v", "error", "-select_streams", "a", "-show_entries", "stream=codec_name", "-of", "csv=p=0",
          str(video)],
         capture_output=True, text=True,
     )
@@ -47,7 +48,7 @@ def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
 def _field_coded(video: Path) -> bool:
     try:
         run = subprocess.run(
-            ["ffprobe", "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+2", "-count_packets",
+            [tool("ffprobe"), "-v", "error", "-select_streams", "v:0", "-read_intervals", "%+2", "-count_packets",
              "-count_frames", "-show_entries", "stream=nb_read_packets,nb_read_frames", "-of", "json", str(video)],
             capture_output=True, text=True, timeout=30,
         )
@@ -60,7 +61,7 @@ def _field_coded(video: Path) -> bool:
 
 def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     streams = subprocess.run(
-        ["ffprobe", "-v", "error", "-show_entries", "format=format_name:stream=codec_type,codec_name,pix_fmt", "-of",
+        [tool("ffprobe"), "-v", "error", "-show_entries", "format=format_name:stream=codec_type,codec_name,pix_fmt", "-of",
          "json", str(video)],
         capture_output=True, text=True,
     )
