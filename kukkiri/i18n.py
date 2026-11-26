@@ -152,6 +152,24 @@ _STRINGS = {
         "{path} 可用 {free} GB：請先釋放空間",
     ),
     "downloaded and verified": ("다운로드 및 확인 완료", "已下载并验证", "已下載並驗證"),
+    "{model} on this machine": ("이 컴퓨터에서 {model}", "本机上的 {model}", "本機上的 {model}"),
+    "needs an NVIDIA GPU: pick {other}": ("NVIDIA GPU가 필요합니다: {other}을(를) 선택하세요", "需要 NVIDIA GPU：请选择 {other}", "需要 NVIDIA GPU：請選擇 {other}"),
+    "needs a GPU with 8 GB or more ({gb} GB here): pick {other}": (
+        "8 GB 이상의 GPU가 필요합니다 (현재 {gb} GB): {other}을(를) 선택하세요",
+        "需要 8 GB 或以上显存的 GPU（本机 {gb} GB）：请选择 {other}",
+        "需要 8 GB 或以上顯示記憶體的 GPU（本機 {gb} GB）：請選擇 {other}",
+    ),
+    "runs ({gb} GB GPU), slower than on 32 GB; for VR video pick {other}": (
+        "실행 가능 ({gb} GB GPU), 32 GB보다 느림; VR 동영상은 {other}을(를) 선택하세요",
+        "可以运行（{gb} GB 显存），比 32 GB 慢；VR 视频请选择 {other}",
+        "可以執行（{gb} GB 顯示記憶體），比 32 GB 慢；VR 影片請選擇 {other}",
+    ),
+    "runs at full speed, VR included": ("VR 포함 최고 속도로 실행", "全速运行，包括 VR", "全速執行，包括 VR"),
+    "{free} GB free on {path}: the {model} download needs about {size}": (
+        "{path}에 {free} GB 여유: {model} 다운로드에 약 {size} 필요",
+        "{path} 可用 {free} GB：{model} 下载约需 {size}",
+        "{path} 可用 {free} GB：{model} 下載約需 {size}",
+    ),
     "not downloaded yet: the first restore downloads them (about {size})": (
         "아직 다운로드하지 않음: 첫 복원 시 다운로드됩니다 (약 {size})",
         "尚未下载：首次修复时会自动下载（约 {size}）",

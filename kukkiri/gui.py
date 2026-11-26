@@ -10,7 +10,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QLocale, QProcess, QProcessEnvironment, QSettings, Qt, QTimer, QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
-from kukkiri.cli import VIDEO_EXTS, _seconds, collect_videos
+from kukkiri.cli import LTX_MIN_VRAM_GB, VIDEO_EXTS, _seconds, collect_videos
 from kukkiri.constants import DISCORD_INVITES, HF_REPO, PUBLIC_REPO
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
 from kukkiri.mux import partial_path
@@ -326,6 +326,22 @@ def _output_name(job: Job, model: str) -> str:
     return f"{job.src.stem}.kukkiri-{model}.{tag}.mp4"
 
 
+APP_DEFAULT_MODEL = "kiyo-ltx-v1"
+
+
+def _default_model(vr: bool) -> str:
+    if vr or APP_DEFAULT_MODEL not in MODELS:
+        return MODELS[0]
+    try:
+        import pynvml
+
+        pynvml.nvmlInit()
+        gb = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0)).total / 2**30
+    except Exception:
+        return MODELS[0]
+    return APP_DEFAULT_MODEL if gb >= LTX_MIN_VRAM_GB else MODELS[0]
+
+
 def _remove_partial(output: Path | None) -> None:
     if output:
         try:
@@ -376,7 +392,8 @@ class MainWindow(QMainWindow):
         for m in MODELS:
             self.model.addItem(m, m)
         saved = self.settings.value("model", "")
-        self.model.setCurrentIndex(max(0, self.model.findData(saved)) if saved in MODELS else 0)
+        start = saved if saved in MODELS else _default_model(bool(self.settings.value("vr", "")))
+        self.model.setCurrentIndex(max(0, self.model.findData(start)))
         self.weights = QLineEdit(self.settings.value("weights", "") or str(default_dir(self._version())))
         self.model.currentIndexChanged.connect(self._model_changed)
         self.outdir = QLineEdit(self.settings.value("outdir", ""))
@@ -545,7 +562,6 @@ class MainWindow(QMainWindow):
         for setter, key in self._texts:
             setter(tr(key))
         self.table.setHorizontalHeaderLabels([tr(c) if c else "" for c in COLS])
-        self.model.setItemText(0, f"{MODELS[0]} ({tr('latest')})")
         for i, m in enumerate(MODELS):
             if is_ltx(version_of(m)):
                 self.model.setItemText(i, f"{m} ({tr('best quality, needs an 8 GB GPU')})")

@@ -72,8 +72,9 @@ will restore. A row can be changed until it starts.
 
 **Advanced…** shows more settings, which kukkiri remembers:
 
-- **Model:** which kiyo model restores, by default the latest (`kiyo-v4`). An older one (`kiyo-v3`) is there for
-  comparison; it is downloaded the first time you use it.
+- **Model:** which kiyo model restores. The app starts on `kiyo-ltx-v1` (the clearest detail; about 15 GB, downloaded
+  the first time it is used) on an NVIDIA GPU with 8 GB or more, and on `kiyo-v4` otherwise or when VR video is turned
+  on. `kiyo-v4` is much faster and runs on any supported GPU; an older one (`kiyo-v3`) is there for comparison.
 - **Weights folder:** where the models are kept, by default `%LOCALAPPDATA%\kukkiri\weights\<version>`. Change it
   only if you keep the models somewhere else.
 - **Output folder:** where restored videos go. Empty means next to each original.

@@ -291,7 +291,7 @@ def _check(args) -> int:
     import shutil
     import subprocess
 
-    from kukkiri.weights import default_dir, download_size, missing, verify, version_of
+    from kukkiri.weights import RELEASES, default_dir, download_size, is_ltx, missing, verify, version_of
 
     def emit(item, status, detail, item_args=None, **kw):
         print(json.dumps({"item": item, "item_args": item_args or {}, "status": status, "detail": detail, "args": kw},
@@ -333,21 +333,41 @@ def _check(args) -> int:
         emit("GPU memory", "warn" if busy else "ok",
              "{free} of {total} GB free: close other programs using the GPU" if busy else "{free} of {total} GB free",
              free=f"{free:.1f}", total=f"{total:.1f}")
+    if is_ltx(version):
+        gb = torch.cuda.get_device_properties(0).total_memory / 2**30 if nvidia and not problem else 0.0
+        if not nvidia:
+            emit("{model} on this machine", "fail", "needs an NVIDIA GPU: pick {other}", {"model": "kiyo-ltx"}, other=MODELS[0])
+        elif problem:
+            pass
+        elif gb < LTX_MIN_VRAM_GB:
+            emit("{model} on this machine", "fail", "needs a GPU with 8 GB or more ({gb} GB here): pick {other}",
+                 {"model": "kiyo-ltx"}, gb=f"{gb:.0f}", other=MODELS[0])
+        elif gb < LTX_VR_MIN_VRAM_GB:
+            emit("{model} on this machine", "info", "runs ({gb} GB GPU), slower than on 32 GB; for VR video pick {other}",
+                 {"model": "kiyo-ltx"}, gb=f"{gb:.0f}", other=MODELS[0])
+        else:
+            emit("{model} on this machine", "ok", "runs at full speed, VR included", {"model": "kiyo-ltx"})
     where = weights
     while not where.exists() and where != where.parent:
         where = where.parent
     free = shutil.disk_usage(where).free / 1e9
-    emit("Free disk space", "warn" if free < 5 else "ok",
-         "{free} GB free on {path}: free some space before restoring" if free < 5 else "{free} GB free on {path}",
-         free=f"{free:.0f}", path=str(where))
+    need = sum(size for _, size, _ in RELEASES[version][1].values()) / 1e9 if missing(weights, version) else 0.0
+    if need and free < need + 5:
+        emit("Free disk space", "warn", "{free} GB free on {path}: the {model} download needs about {size}",
+             free=f"{free:.0f}", path=str(where), model="kiyo-ltx" if is_ltx(version) else model, size=download_size(version))
+    else:
+        emit("Free disk space", "warn" if free < 5 else "ok",
+             "{free} GB free on {path}: free some space before restoring" if free < 5 else "{free} GB free on {path}",
+             free=f"{free:.0f}", path=str(where))
+    shown = "kiyo-ltx" if is_ltx(version) else model
     if missing(weights, version):
         emit("Model files ({model})", "info", "not downloaded yet: the first restore downloads them (about {size})",
-             {"model": model}, size=download_size(version))
+             {"model": shown}, size=download_size(version))
     elif verify(weights, version):
         emit("Model files ({model})", "fail", "damaged: delete {path} and restore again to download them anew",
-             {"model": model}, path=str(weights))
+             {"model": shown}, path=str(weights))
     else:
-        emit("Model files ({model})", "ok", "downloaded and verified", {"model": model})
+        emit("Model files ({model})", "ok", "downloaded and verified", {"model": shown})
     ff = shutil.which(args.ffmpeg)
     if ff:
         out = subprocess.run([ff, "-version"], capture_output=True, text=True).stdout.split()
@@ -395,13 +415,13 @@ def main(argv: list[str] | None = None) -> None:
                    "each eye)")
     r.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
     r.add_argument("-v", "--verbose", action="store_true")
-    m = sub.add_parser("add-mosaic", help="add mosaics: a block mosaic over the bare genitals in videos")
+    m = sub.add_parser("add-mosaic", help="add mosaics: a block mosaic where a censored release would have one")
     m.add_argument("input", nargs="+", help="video files and/or folders (searched recursively)")
     m.add_argument("-o", "--output", help="output mp4 for one input file, else an output folder "
                    "(default: <name>.kukkiri-mosaic.mp4 next to each input)")
     m.add_argument("--block", type=int, default=None, help="mosaic block size in pixels (default: frame height / 36)")
     m.add_argument("--sensitivity", choices=list(SENSITIVITY), default="normal",
-                   help="how readily bare genitals are found: high misses fewer (and may mosaic a few things that are "
+                   help="how readily the areas to mosaic are found: high misses fewer (and may mosaic a few things that are "
                    "not), low mosaics fewer false finds (ignored with --threshold)")
     m.add_argument("--threshold", type=float, default=None, help=f"detector score threshold (default: "
                    f"{ADD_MOSAIC_THRESHOLD}, scaled by --sensitivity)")
