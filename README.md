@@ -6,7 +6,8 @@ Restore mosaic-censored video. kukkiri finds the pixelated areas in every frame,
 rebuilds what is under them, then writes the result back into the original video with its sound. It streams the
 video, so a two-hour film needs no more memory than a two-minute clip.
 
-It also works the other way: [`kukkiri add-mosaic`](#add-mosaics) adds a block mosaic over the bare genitals in a video.
+It also works the other way: [`kukkiri add-mosaic`](#add-mosaics) censors a video with a block mosaic, the way a
+censored release would.
 
 [![original, mosaic and kukkiri side by side](docs/media/strawberry.webp)](docs/media/strawberry.mp4)
 
@@ -120,10 +121,10 @@ GPU decoder cannot read directly (AVI, WMV, MPEG-TS, ...) are converted to MP4 f
 kukkiri add-mosaic input.mp4
 ```
 
-Adds a block mosaic (blocks of about a 36th of the frame height, on a grid fixed to the frame) over the bare genitals,
-written next to the input as `<name>.kukkiri-mosaic.mp4` (or to `-o`). `--block` sets the block size in pixels;
-`--sensitivity high` misses fewer. It needs only the kiyo-v4 weights. It is best effort: a frame the detector misses
-for longer than a few frames stays uncensored, so check the result before relying on it.
+Adds a block mosaic (blocks of about a 36th of the frame height, on a grid fixed to the frame) where a censored
+release would have one, written next to the input as `<name>.kukkiri-mosaic.mp4` (or to `-o`). `--block` sets the
+block size in pixels; `--sensitivity high` misses fewer. It needs only the kiyo-v4 weights. It is best effort: a frame
+the detector misses for longer than a few frames stays uncensored, so check the result before relying on it.
 
 ## Limitations
 
