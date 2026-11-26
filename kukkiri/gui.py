@@ -13,6 +13,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPalette
 from kukkiri.cli import VIDEO_EXTS, _seconds, collect_videos
 from kukkiri.constants import DISCORD_INVITES, HF_REPO, PUBLIC_REPO
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
+from kukkiri.mux import partial_path
 from kukkiri.weights import MODELS as ALL_MODELS
 from kukkiri.weights import default_dir, download_size, is_ltx, missing, version_of
 
@@ -323,6 +324,14 @@ def _output_name(job: Job, model: str) -> str:
         return f"{job.src.stem}.kukkiri-{model}.mp4"
     tag = "_".join(t.replace(":", "-") for t in (job.start or "0", job.duration) if t)
     return f"{job.src.stem}.kukkiri-{model}.{tag}.mp4"
+
+
+def _remove_partial(output: Path | None) -> None:
+    if output:
+        try:
+            partial_path(output).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 class MainWindow(QMainWindow):
@@ -780,6 +789,7 @@ class MainWindow(QMainWindow):
             self._set(row, "Cancelled", 0, "", "")
             if job.output and job.output.exists():
                 job.output.unlink()
+            _remove_partial(job.output)
         elif code == 0 or self._done:
             self._set(row, "Done", 100, "", "")
         elif code == 2:
@@ -787,6 +797,7 @@ class MainWindow(QMainWindow):
             self._set(row, "Skipped: {reason}", 0, "", "", reason=tr(reason))
         else:
             self._set(row, "Failed (exit {code}), see log", None, "", "", code=code)
+            _remove_partial(job.output)
         self.proc = None
         self._next()
 

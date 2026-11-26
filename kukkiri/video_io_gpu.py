@@ -23,6 +23,19 @@ _NVC_LOCK = (
 GPU_READABLE_CONTAINERS = {"mp4", "mov"}
 GPU_READABLE_PIX_FMTS = {"h264": {"yuv420p", "yuvj420p"}, "hevc": {"yuv420p", "yuvj420p", "yuv420p10le"}}
 MUXABLE_AUDIO = {"aac", "mp3", "ac3", "eac3"}
+NVENC_H264 = ["-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq", "-rc", "constqp", "-qp", "16"]
+X264_H264 = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
+
+
+def _run_reencode(cmd: list[str], vcodec_at: int) -> subprocess.CompletedProcess:
+    run = None
+    if torch.cuda.is_available():
+        run = subprocess.run(cmd[:vcodec_at] + NVENC_H264 + cmd[vcodec_at:], capture_output=True, text=True)
+        if run.returncode != 0:
+            logger.warning(f"NVENC re-encode failed ({run.returncode}), retrying with x264: {run.stderr[-300:]}")
+    if run is None or run.returncode != 0:
+        run = subprocess.run(cmd[:vcodec_at] + X264_H264 + cmd[vcodec_at:], capture_output=True, text=True)
+    return run
 
 
 def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
@@ -34,11 +47,12 @@ def repair_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> Path:
     )
     audio_ok = streams.returncode == 0 and all(a in MUXABLE_AUDIO for a in streams.stdout.split())
     cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?"]
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p", "-vsync", "cfr"]
+    at = len(cmd)
+    cmd += ["-pix_fmt", "yuv420p", "-vsync", "cfr"]
     cmd += ["-c:a", "copy"] if audio_ok else ["-c:a", "aac", "-b:a", "192k"]
     cmd += ["-movflags", "+faststart", str(out)]
     t = time.time()
-    run = subprocess.run(cmd, capture_output=True, text=True)
+    run = _run_reencode(cmd, at)
     if run.returncode != 0 or not out.exists():
         raise FFmpegError(f"could not repair {Path(video).name} ({run.returncode}): {run.stderr[-500:]}")
     logger.info(f"{Path(video).name}: repaired copy in {time.time() - t:.0f} s")
@@ -80,13 +94,13 @@ def gpu_readable_source(video: Path, out_dir: Path, ffmpeg: str = "ffmpeg") -> P
     if container_ok and video_ok and audio_ok:
         return Path(video)
     out = Path(out_dir) / "source_readable.mp4"
-    vcodec = ["-c:v", "copy"] if video_ok else ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
-    vcodec += [] if video_ok else ["-pix_fmt", "yuv420p", "-vsync", "cfr"]
+    vcodec = ["-c:v", "copy"] if video_ok else ["-pix_fmt", "yuv420p", "-vsync", "cfr"]
     acodec = ["-c:a", "copy"] if audio_ok else ["-c:a", "aac", "-b:a", "192k"]
-    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?", *vcodec, *acodec]
-    cmd += ["-movflags", "+faststart", str(out)]
+    cmd = [ffmpeg, "-v", "error", "-y", "-i", str(video), "-map", "0:v:0", "-map", "0:a?"]
+    at = len(cmd)
+    cmd += [*vcodec, *acodec, "-movflags", "+faststart", str(out)]
     t = time.time()
-    run = subprocess.run(cmd, capture_output=True, text=True)
+    run = subprocess.run(cmd, capture_output=True, text=True) if video_ok else _run_reencode(cmd, at)
     if run.returncode != 0:
         raise FFmpegError(f"could not make {Path(video).name} readable ({run.returncode}): {run.stderr[-500:]}")
     logger.info(
@@ -108,6 +122,27 @@ def _frame_to_tensor(fr, device: str) -> torch.Tensor:
     return t.flip(-1).contiguous()
 
 
+def _decoded_hw(video: Path, meta, gpu_id: int = 0) -> tuple[int, int]:
+    import PyNvVideoCodec as nvc
+    from PyNvVideoCodec.decoders.SimpleDecoder import SimpleDecoder
+
+    hw = (int(meta.height), int(meta.width))
+    try:
+        with _NVC_LOCK:
+            dec = SimpleDecoder(str(video), gpu_id, 0, 0, True, 0, 0, 0, 4, nvc.OutputColorType.RGB)
+            frames = dec.get_batch_frames(1)
+            got = tuple(int(x) for x in frames[0].cuda()[0].__cuda_array_interface__["shape"][:2]) if frames else hw
+            del frames, dec
+        if got != hw:
+            logger.warning(
+                f"{Path(video).name}: NVDEC metadata says {hw[1]}x{hw[0]}, frames decode at {got[1]}x{got[0]}"
+            )
+        return got
+    except Exception as e:
+        logger.warning(f"{Path(video).name}: trial decode failed, using NVDEC's {hw[1]}x{hw[0]}: {e!r}")
+        return hw
+
+
 class GpuFrameStore:
 
     def __init__(
@@ -124,7 +159,7 @@ class GpuFrameStore:
         self.dec = SimpleDecoder(str(video), gpu_id, 0, 0, True, 0, 0, 0, 4, nvc.OutputColorType.RGB)
         meta = self.dec.get_stream_metadata()
         self.n = int(meta.num_frames)
-        self.hw = (int(meta.height), int(meta.width))
+        self.hw = _decoded_hw(video, meta, gpu_id)
         self.scale_to = None if scale_to is None or tuple(scale_to) == self.hw else tuple(scale_to)
         if self.scale_to is not None:
             self.hw = self.scale_to
@@ -169,7 +204,10 @@ class GpuFrameStore:
 
     def _convert(self, frames) -> list[torch.Tensor]:
         if self.scale_to is None:
-            return [_frame_to_tensor(fr, self.device) for fr in frames]
+            out = [_frame_to_tensor(fr, self.device) for fr in frames]
+            if out and tuple(out[0].shape[:2]) != tuple(self.hw):
+                raise RuntimeError(f"decoded frames are {tuple(out[0].shape[:2])}, expected {tuple(self.hw)}")
+            return out
         out = []
         for fr in frames:
             x = _frame_to_tensor(fr, self.device)[None].permute(0, 3, 1, 2).half()
@@ -199,7 +237,7 @@ class SharedFrameStore:
         self.stride = stride
         self._src = 0
         self.n = -(-int(meta.num_frames) // stride)
-        self.hw = (int(meta.height), int(meta.width))
+        self.hw = _decoded_hw(video, meta, gpu_id)
         self.fps = float(meta.average_fps) / stride
         self.device, self.batch = device, batch
         self.scale_to = None if scale_to is None or tuple(scale_to) == self.hw else tuple(scale_to)

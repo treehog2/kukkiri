@@ -40,27 +40,43 @@ def probe(video: Path) -> dict:
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,r_frame_rate,nb_frames,bit_rate:format=duration,bit_rate",
+            "stream:format=duration,bit_rate",
             "-of",
             "json",
             str(video),
         ],
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         raise FFmpegError(f"ffprobe could not read {Path(video).name}: {proc.stderr.strip()[-300:]}")
-    j = json.loads(proc.stdout)
+    j = json.loads(proc.stdout, strict=False)
     s, f = j["streams"][0], j.get("format", {})
     num, den = s["r_frame_rate"].split("/")
+    sar = tuple(int(x) for x in s.get("sample_aspect_ratio", "").split(":") if x.isdigit())
     return {
         "width": int(s["width"]),
         "height": int(s["height"]),
         "fps": float(num) / float(den),
         "nb_frames": int(s.get("nb_frames") or 0),
         "duration": float(f.get("duration") or 0.0),
+        "video_duration": float(s.get("duration") or f.get("duration") or 0.0),
         "bit_rate": int(s.get("bit_rate") or f.get("bit_rate") or 0),
+        "sar": sar if len(sar) == 2 and 0 not in sar and sar[0] != sar[1] else None,
+        "rotation": next((float(d["rotation"]) for d in s.get("side_data_list", []) if "rotation" in d), 0.0),
     }
+
+
+STANDARD_FPS = (24000 / 1001, 24.0, 25.0, 30000 / 1001, 30.0, 48.0, 50.0, 60000 / 1001, 60.0)
+
+
+def plausible_fps(declared: float, n_frames: int, duration: float) -> float:
+    if not (declared and n_frames and duration) or declared <= 1.5 * n_frames / duration:
+        return declared
+    avg = n_frames / duration
+    near = min(STANDARD_FPS, key=lambda r: abs(r - avg))
+    return near if abs(near - avg) <= 0.01 * avg else avg
 
 
 def frame_repeats(video: Path, fps: float, n_frames: int, duration: float) -> list[int] | None:

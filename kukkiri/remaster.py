@@ -363,7 +363,7 @@ def _remaster_once(
         JobSource,
         restore_stream,
     )
-    from kukkiri.video_io import frame_repeats, probe
+    from kukkiri.video_io import frame_repeats, plausible_fps, probe
     from kukkiri.video_io_gpu import (
         GpuVideoWriter,
         SharedFrameStore,
@@ -383,6 +383,12 @@ def _remaster_once(
     src = readable
     fps = float(info.get("fps") or 30.0)
     n_frames = int(info.get("nb_frames") or 0)
+    duration = float(info.get("video_duration") or 0)
+    real = plausible_fps(fps, n_frames, duration)
+    if real != fps:
+        logger.warning(f"{src.name}: declares {fps:.3f} fps but holds {n_frames} frames over {duration:.0f} s: "
+                       f"stamping at {real:.3f}")
+        fps = real
     height = int(info.get("height") or 0)
     if threshold is None and cfg.vr:
         from kukkiri.vr import THRESHOLD
@@ -445,7 +451,10 @@ def _remaster_once(
     cap = int(min(max(bitrate_factor * src_bitrate, min_bitrate), max_bitrate)) if src_bitrate else None
     logger.info(f"encode: source {(input_bitrate or 0) / 1e6:.2f} Mbps -> cap {cap / 1e6 if cap else None} Mbps")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    mux = LiveMuxer(src, dst, fps, n_out / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg)
+    mux = LiveMuxer(
+        src, dst, fps, n_out / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg,
+        sar=info.get("sar"), size=(frames.hw[1], frames.hw[0]), rotation=info.get("rotation", 0),
+    )
     idr_period = mux.idr_period(fps) if live_dir else None
     if device.pick() is Device.CUDA:
         writer = GpuVideoWriter(
