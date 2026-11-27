@@ -1,0 +1,18 @@
+numpy==2.3.5
+opencv-python-headless==5.0.0.93
+rfdetr==1.10.1
+PyNvVideoCodec==2.2.2
+tensorrt-cu13==11.3.0.99
+onnx==1.22.0
+onnxconverter-common==1.16.0
+safetensors==0.8.0
+# kiyo-ltx: what Lightricks' LTX packages import
+transformers==5.17.0
+accelerate==1.15.0
+einops==0.8.2
+scipy==1.18.1
+colour-science==0.4.7
+av==18.1.0
+OpenImageIO==3.2.2.0
+pillow
+tqdm

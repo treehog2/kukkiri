@@ -30,18 +30,14 @@ screenshots.
 ### Linux
 
 ```
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu130   # match your CUDA
-pip install .
+git clone https://github.com/treehog2/kukkiri && cd kukkiri
+./install.sh            # add --gui for the desktop app
 ```
 
-For kiyo-ltx also install its packages ([details](docs/kiyo-ltx.md)):
-
-```
-pip install ".[ltx]"
-pip install --no-deps --index-url https://download.pytorch.org/whl/cu130 torchaudio==2.11.0
-pip install --no-deps "ltx-core @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-core"
-pip install --no-deps "ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-pipelines"
-```
+It checks the NVIDIA driver (580 or newer), Python (3.12 or newer) and ffmpeg, then installs kukkiri and kiyo-ltx's
+packages into `.venv` (about 10 GB) and runs `kukkiri check`. kiyo-ltx is fastest with a C compiler and Python's
+headers installed (`sudo apt install build-essential python3-dev`). To install by hand instead, the pinned packages
+are in [packaging/linux](packaging/linux).
 
 Or with Docker (NVIDIA Container Toolkit, driver 580 or newer); the image includes kiyo-ltx's packages:
 
@@ -53,8 +49,7 @@ docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" kukkiri \
 
 Keep the weights folder mounted writable, so the GPU engines built on the first run are reused.
 
-A desktop app is included too: `pip install ".[gui]"`, then `kukkiri-gui` (see the [Windows guide](docs/windows.md)
-for how it works).
+The desktop app (`./install.sh --gui`, then `kukkiri-gui`) works as in the [Windows guide](docs/windows.md).
 
 ### Mac (Apple Silicon, experimental)
 

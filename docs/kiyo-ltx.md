@@ -27,16 +27,11 @@ After that, a 10-second 1080p clip takes about 45 seconds on a high-end GPU, inc
 Videos above 30 fps are restored at 30 fps by default (59.94 becomes 29.97), which halves the work; `--keep-fps` keeps
 the full frame rate at about twice the time. VR with kiyo-ltx needs a GPU with 32 GB ([VR](vr.md)).
 
-## Install with pip
+## Install on Linux
 
-The Windows app and the Docker image include everything it needs. With pip, also install its packages:
-
-```
-pip install ".[ltx]"
-pip install --no-deps --index-url https://download.pytorch.org/whl/cu130 torchaudio==2.11.0
-pip install --no-deps "ltx-core @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-core"
-pip install --no-deps "ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-pipelines"
-```
+The Windows app, `./install.sh` and the Docker image include everything it needs. By hand, install the files in
+[packaging/linux](../packaging/linux) in order: `requirements-torch.txt`, `requirements-base.txt`, then
+`requirements-nodeps.txt` with `--no-deps` (the LTX packages' own pins are older than the versions kiyo-ltx uses).
 
 ## Full frame
 

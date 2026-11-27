@@ -1,0 +1,9 @@
+# installed with --no-deps (their declared pins conflict with the versions above)
+--index-url https://download.pytorch.org/whl/cu130
+--extra-index-url https://pypi.org/simple
+torch_tensorrt==2.14.0+cu130
+dllist==2.0.0
+psutil==7.2.2
+torchaudio==2.11.0
+ltx-core @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-core
+ltx-pipelines @ https://github.com/Lightricks/LTX-2/archive/f0f2f8607189c78a72420b2b63cb1975b5eca179.zip#subdirectory=packages/ltx-pipelines
