@@ -42,10 +42,11 @@ are in [packaging/linux](packaging/linux).
 Or with Docker (NVIDIA Container Toolkit, driver 580 or newer); the image includes kiyo-ltx's packages:
 
 ```
-docker build -t kukkiri .
-docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" kukkiri \
+docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" ghcr.io/treehog2/kukkiri \
     restore /data/input.mp4 -o /data/restored.mp4 --weights /weights
 ```
+
+To build the image yourself: `docker build -t kukkiri .`
 
 Keep the weights folder mounted writable, so the GPU engines built on the first run are reused.
 

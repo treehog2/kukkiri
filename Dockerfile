@@ -1,9 +1,10 @@
-# kukkiri CLI on CUDA 13 (torch 2.14, TensorRT 11, NVDEC/NVENC). The host needs an NVIDIA driver >= 580 and the
-# NVIDIA Container Toolkit.
+# kukkiri CLI on CUDA 13 (torch 2.14, TensorRT 11, NVDEC/NVENC), published as ghcr.io/treehog2/kukkiri. The host needs
+# an NVIDIA driver >= 580 and the NVIDIA Container Toolkit.
 #
-#   docker build -t kukkiri .
-#   docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" kukkiri \
+#   docker run --rm --gpus all -v "$PWD:/data" -v "$PWD/weights:/weights" ghcr.io/treehog2/kukkiri \
 #       restore /data/input.mp4 -o /data/restored.mp4 --weights /weights
+#
+# To build it yourself: docker build -t kukkiri .
 #
 # TensorRT engines are built into the weights directory on the first run, so mount it writable to keep them.
 FROM nvidia/cuda:13.0.2-cudnn-runtime-ubuntu24.04
