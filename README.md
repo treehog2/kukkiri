@@ -99,6 +99,12 @@ file and skips it when there is nothing to restore (already uncensored or alread
 is declined or fails is reported and the rest go on; earlier kukkiri outputs in those folders are left out. Inputs the
 GPU decoder cannot read directly (AVI, WMV, MPEG-TS, ...) are converted to MP4 first.
 
+The output can be played while it is written (`<name>.part`, renamed when done; in the app, **Watch** opens it in VLC,
+except with kiyo-ltx on GPUs under 15 GB, which write the video only in their last pass). On an NVIDIA GPU, a video of 15
+minutes or more is restored in parts, kept in a `<output>.kukkiri-job` folder until it is done: if the restore is
+interrupted, run the same command again and it carries on from the last finished part. The folder needs up to about
+twice the output's size on the output's disk.
+
 | Option | |
 |---|---|
 | `--model` | `kiyo-v4` (default), `kiyo-ltx-v1` or `kiyo-v3` |
@@ -107,6 +113,10 @@ GPU decoder cannot read directly (AVI, WMV, MPEG-TS, ...) are converted to MP4 f
 | `--keep-fps` | kiyo-ltx: keep sources above 30 fps at their full rate (about twice as slow; by default 59.94 becomes 29.97) |
 | `--full-frame` | kiyo-ltx: redraw the whole picture, for mosaics that are not found otherwise (see Limitations) |
 | `--vr sbs` | side-by-side 180° VR video ([details](docs/vr.md)) |
+| `--codec hevc` | HEVC output: about a third smaller at the same quality (`h264`, the default, plays everywhere) |
+| `--gpu 1` | restore on another NVIDIA GPU (numbered as `nvidia-smi` lists them) |
+| `--gpus 0,1` / `all` | split each video across several NVIDIA GPUs |
+| `--restart` | start an interrupted restore over instead of resuming it |
 | `--previews` | also write up to three watermarked before/after clips |
 | `--skip-check` | restore even if the input looks uncensored |
 | `kukkiri check` | test the GPU, driver, disk, model files and ffmpeg |

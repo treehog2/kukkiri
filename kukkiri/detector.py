@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import logging
 from dataclasses import dataclass
 from enum import Enum
@@ -141,9 +143,11 @@ class CensorDetector:
         wdir = Path(self.weights).parent
         half = trt_compat.strongly_typed(trt)
         exp = wdir / (f"export_b{batch}_fp16" if half else f"export_b{batch}")
-        eng_path = exp / f"det_b{batch}_h16_trt{trt_compat.trt_major(trt)}.engine"
+        eng_path = exp / f"det_b{batch}_h16_trt{trt_compat.trt_major(trt)}_{trt_compat.gpu_tag()}.engine"
         logger = trt.Logger(trt.Logger.WARNING)
-        if not eng_path.exists():
+        trt_compat.adopt_untagged(eng_path, trt_compat.gpu_tag())
+        engine = trt.Runtime(logger).deserialize_cuda_engine(eng_path.read_bytes()) if eng_path.exists() else None
+        if engine is None:
             build_from = self.onnx_for_engine(batch, half)
             builder = trt.Builder(logger)
             network = builder.create_network(trt_compat.network_flags(trt))
@@ -153,8 +157,11 @@ class CensorDetector:
             config = builder.create_builder_config()
             trt_compat.configure_fp16(trt, config)
             config.set_memory_pool_limit(trt.MemoryPoolType.WORKSPACE, 4 << 30)
-            eng_path.write_bytes(bytes(builder.build_serialized_network(network, config)))
-        self._trt_engine = trt.Runtime(logger).deserialize_cuda_engine(eng_path.read_bytes())
+            tmp = eng_path.with_name(f"{eng_path.name}.{os.getpid()}.tmp")
+            tmp.write_bytes(bytes(builder.build_serialized_network(network, config)))
+            tmp.replace(eng_path)
+            engine = trt.Runtime(logger).deserialize_cuda_engine(eng_path.read_bytes())
+        self._trt_engine = engine
         self._trt_ctx = self._trt_engine.create_execution_context()
         self._trt_bufs = trt_compat.io_buffers(trt, self._trt_engine, "cuda")
         for n, buf in self._trt_bufs.items():

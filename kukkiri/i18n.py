@@ -8,6 +8,19 @@ _STRINGS = {
     "Remove": ("제거", "移除", "移除"),
     "Advanced": ("고급", "高级", "進階"),
     "Before/after previews": ("전후 비교 미리보기", "前后对比预览", "前後對比預覽"),
+    "Video format": ("비디오 형식", "视频格式", "影片格式"),
+    "GPU": ("GPU", "GPU", "GPU"),
+    "All GPUs (each video split across them)": (
+        "모든 GPU (각 동영상을 나누어 처리)",
+        "所有 GPU（每个视频分到各 GPU 处理）",
+        "所有 GPU（每部影片分到各 GPU 處理）",
+    ),
+    "H.264 (plays everywhere)": ("H.264 (어디서나 재생)", "H.264（到处都能播放）", "H.264（到處都能播放）"),
+    "HEVC (smaller files, needs a newer player)": (
+        "HEVC (더 작은 파일, 최신 플레이어 필요)",
+        "HEVC（文件更小，需要较新的播放器）",
+        "HEVC（檔案更小，需要較新的播放器）",
+    ),
     "Also write up to 3 short side-by-side clips (with a kukkiri watermark) of the most restored moments, next to "
     "each restored video": (
         "복원된 동영상 옆에, 가장 많이 복원된 장면의 짧은 비교 클립(kukkiri 워터마크 포함)을 최대 3개까지 함께 저장합니다",
@@ -96,15 +109,35 @@ _STRINGS = {
     "Checking": ("확인 중", "正在检查", "正在檢查"),
     "Cutting section": ("구간 자르는 중", "正在截取片段", "正在擷取片段"),
     "Cancelled": ("취소됨", "已取消", "已取消"),
+    "Stopped": ("중지됨", "已停止", "已停止"),
+    "With kiyo-ltx on a GPU with less than 15 GB of memory the video is restored in passes and written in the last one: "
+    "Watch turns on near the end.": (
+        "메모리가 15GB 미만인 GPU에서 kiyo-ltx는 여러 단계로 복원하며 마지막 단계에서 동영상을 기록합니다. 보기 버튼은 거의 끝날 때 켜집니다.",
+        "在显存少于 15 GB 的 GPU 上，kiyo-ltx 分多遍修复，并在最后一遍写入视频：观看按钮会在接近结束时才可用。",
+        "在顯示記憶體少於 15 GB 的 GPU 上，kiyo-ltx 分多次修復，並在最後一次寫入影片：觀看按鈕會在接近結束時才可用。",
+    ),
+    "Watch": ("보기", "观看", "觀看"),
+    "Play the video being restored while it is restored, in VLC": (
+        "복원 중인 동영상을 복원하는 동안 VLC에서 재생합니다",
+        "在修复过程中用 VLC 播放正在修复的视频",
+        "在修復過程中用 VLC 播放正在修復的影片",
+    ),
+    "To watch a video while it is restored, install VLC (videolan.org): kukkiri opens it there and it keeps playing as "
+    "the restore goes on. The finished video plays in any player.": (
+        "복원 중에 동영상을 보려면 VLC(videolan.org)를 설치하세요. kukkiri가 VLC에서 열고, 복원이 진행되는 동안 계속 "
+        "재생됩니다. 완성된 동영상은 어떤 플레이어에서나 재생됩니다.",
+        "要在修复过程中观看视频，请安装 VLC（videolan.org）：kukkiri 会用它打开，并随修复进度持续播放。修复完成的视频可用任何播放器播放。",
+        "要在修復過程中觀看影片，請安裝 VLC（videolan.org）：kukkiri 會用它開啟，並隨修復進度持續播放。修復完成的影片可用任何播放器播放。",
+    ),
     "Done": ("완료", "完成", "完成"),
     "Skipped: {reason}": ("건너뜀: {reason}", "已跳过：{reason}", "已略過：{reason}"),
     "nothing to restore": ("복원할 부분 없음", "没有需要修复的内容", "沒有需要修復的內容"),
     "already uncensored or restored": ("이미 무수정이거나 복원됨", "已无码或已修复", "已無碼或已修復"),
     "Failed (exit {code}), see log": ("실패 (코드 {code}), 로그 참조", "失败（代码 {code}），请查看日志", "失敗（代碼 {code}），請查看記錄"),
-    "Add videos or drop them here. Double-click a finished row to open it.": (
-        "동영상을 추가하거나 여기로 끌어다 놓으세요. 완료된 행을 더블클릭하면 열립니다.",
-        "添加视频或拖放到此处。双击已完成的行即可打开。",
-        "新增影片或拖放到此處。按兩下已完成的列即可開啟。",
+    "Add videos or drop them here. Double-click a row to watch it while it is restored, or to open it when done.": (
+        "동영상을 추가하거나 여기로 끌어다 놓으세요. 행을 더블클릭하면 복원 중에는 재생하고, 완료되면 엽니다.",
+        "添加视频或拖放到此处。双击某一行，修复中可观看，完成后即可打开。",
+        "新增影片或拖放到此處。按兩下某一列，修復中可觀看，完成後即可開啟。",
     ),
     "Stopped.": ("중지됨.", "已停止。", "已停止。"),
     "Queue finished.": ("대기열 완료.", "队列已完成。", "佇列已完成。"),

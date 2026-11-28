@@ -102,15 +102,18 @@ class FfmpegFrameStore(SharedFrameStore):
 class FfmpegVideoWriter:
 
     def __init__(self, width: int, height: int, fps: float, qp: int, stream, max_bitrate: int | None = None,
-                 idr_period: int | None = None, ffmpeg: str = "ffmpeg"):
+                 idr_period: int | None = None, ffmpeg: str = "ffmpeg", codec: str = "h264"):
+        hevc = codec == "hevc"
         if sys.platform == "darwin":
-            enc = ["-c:v", "h264_videotoolbox", "-profile:v", "high", *(["-b:v", str(max_bitrate)] if max_bitrate else ["-q:v", "80"])]
+            vt = ["-c:v", "hevc_videotoolbox"] if hevc else ["-c:v", "h264_videotoolbox", "-profile:v", "high"]
+            enc = [*vt, *(["-b:v", str(max_bitrate)] if max_bitrate else ["-q:v", "80"])]
         else:
             cap = ["-maxrate", str(max_bitrate), "-bufsize", str(max_bitrate)] if max_bitrate else []
-            enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(qp), *cap]
+            enc = ["-c:v", "libx265", "-preset", "veryfast", "-crf", str(qp + 5), *cap] if hevc else \
+                ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(qp), *cap]
         cmd = [ffmpeg, "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{width}x{height}", "-r", f"{fps:.6f}",
                "-i", "-", "-vf", FROM_BGR, *enc,
-               "-bf", "0", *(["-g", str(idr_period)] if idr_period else []), "-f", "h264", "-"]
+               "-bf", "0", *(["-g", str(idr_period)] if idr_period else []), "-f", codec, "-"]
         self._err = tempfile.TemporaryFile()
         self._p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=stream, stderr=self._err)
         self.n = 0

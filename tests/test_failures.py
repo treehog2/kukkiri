@@ -2,6 +2,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -119,5 +120,8 @@ def test_the_muxer_says_why_it_ended(tmp_path):
     m = LiveMuxer(tmp_path / "nothing.mp4", tmp_path / "o.mp4", 25.0, 1.0)
     assert m.failure() is None
     m.stdin.close()
-    m.proc.wait(20)
-    assert m.failure().startswith("ffmpeg mux failed")
+    for _ in range(200):
+        if m.failure():
+            break
+        time.sleep(0.1)
+    assert "mux failed" in m.failure()

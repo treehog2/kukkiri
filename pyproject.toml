@@ -23,6 +23,7 @@ dependencies = [
     "onnx>=1.16; sys_platform != 'darwin'",
     "onnxconverter-common>=1.14; sys_platform != 'darwin'",
     "safetensors>=0.4",
+    "av>=14",  # muxing the restore as it is encoded (kukkiri.mux); 13 lacks add_stream_from_template
 ]
 
 [project.optional-dependencies]

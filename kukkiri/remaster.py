@@ -44,9 +44,11 @@ class RemasterConfig:
     vr: str | None = None
     vr_lens: str = "equirect"
     full_frame: bool = False
+    codec: str = "h264"
 
 
 VR_MAX_BITRATE = 80_000_000
+HEVC_BITRATE_SHARE = 0.65
 
 
 @dataclass
@@ -147,7 +149,20 @@ def _load_full_frame(weights_dir: Path):
     return LtxRestorer(weights_dir, compile=False, resident_blocks=_ltx_resident_blocks())
 
 
+_MODEL_CACHE: dict = {}
+
+
 def _load_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch: int):
+    if os.environ.get("KUKKIRI_KEEP_MODELS") != "1" or (cfg.ltx and _ltx_staged()):
+        return _build_models(weights_dir, cfg, threshold, batch)
+    key = (str(weights_dir), cfg.detector_size, cfg.vr, cfg.ltx, cfg.ltx_min_size, threshold, batch)
+    if key not in _MODEL_CACHE:
+        _MODEL_CACHE.clear()
+        _MODEL_CACHE[key] = _build_models(weights_dir, cfg, threshold, batch)
+    return _MODEL_CACHE[key]
+
+
+def _build_models(weights_dir: Path, cfg: RemasterConfig, threshold: float, batch: int):
     from kukkiri.detector import CensorDetector, RFDETRSize
     from kukkiri.restorer import VideoRestorer
     from kukkiri.weights import detector_checkpoint, restorer_weights
@@ -315,6 +330,47 @@ def _detect_loop(detector, bq, tk, em, source, stats, cut_tv: float, vr=None, fi
         stats["n_frames"] = fi
 
 
+class _RawPart:
+
+    def __init__(self, dst: Path):
+        self.dst = Path(dst)
+        self.stdin = open(self.dst, "wb")
+
+    def new_files(self) -> list[Path]:
+        return []
+
+    def failure(self) -> str | None:
+        return None
+
+    def kill(self) -> None:
+        self.stdin.close()
+        try:
+            self.dst.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+    def close(self) -> None:
+        self.stdin.close()
+
+
+def stream_rate(info: dict, cfg: RemasterConfig, name: str = "") -> tuple[float, int]:
+    from kukkiri.video_io import plausible_fps
+
+    fps = float(info.get("fps") or 30.0)
+    n_frames = int(info.get("nb_frames") or 0)
+    duration = float(info.get("video_duration") or 0)
+    real = plausible_fps(fps, n_frames, duration)
+    if real != fps:
+        logger.warning(f"{name}: declares {fps:.3f} fps but holds {n_frames} frames over {duration:.0f} s: "
+                       f"stamping at {real:.3f}")
+        fps = real
+    max_fps = cfg.max_fps if cfg.max_fps is not None else (30.0 if cfg.ltx else 0.0)
+    stride = 1
+    while max_fps and fps / stride > max_fps * 1.05:
+        stride += 1
+    return fps, stride
+
+
 def _eta_s(done: int, n_frames: int, since_first_s: float) -> float | None:
     if done <= 32:
         return None
@@ -337,7 +393,7 @@ def remaster(src: str | Path, dst: str | Path, weights_dir: str | Path, **kwargs
                 raise SourceTruncated(got, e.expected, e.fps) from e
             if kwargs.get("live_dir"):
                 shutil.rmtree(kwargs["live_dir"], ignore_errors=True)
-            return _remaster_once(repaired, dst, weights_dir, original=src, **kwargs)
+            return _remaster_once(repaired, dst, weights_dir, **{**kwargs, "original": kwargs.get("original") or src})
         finally:
             shutil.rmtree(work, ignore_errors=True)
 
@@ -355,6 +411,8 @@ def _remaster_once(
     live_dir: str | Path | None = None,
     on_live_file: LiveCallback | None = None,
     original: str | Path | None = None,
+    frame_range: tuple[int, int] | None = None,
+    part: bool = False,
 ) -> RemasterResult:
     from kukkiri.mux import LiveMuxer
     from kukkiri.geometry import CLIP
@@ -381,14 +439,8 @@ def _remaster_once(
     info = probe(readable)
     input_bitrate = info.get("bit_rate") if readable == src and not original else probe(original or src).get("bit_rate")
     src = readable
-    fps = float(info.get("fps") or 30.0)
+    fps, stride = stream_rate(info, cfg, src.name)
     n_frames = int(info.get("nb_frames") or 0)
-    duration = float(info.get("video_duration") or 0)
-    real = plausible_fps(fps, n_frames, duration)
-    if real != fps:
-        logger.warning(f"{src.name}: declares {fps:.3f} fps but holds {n_frames} frames over {duration:.0f} s: "
-                       f"stamping at {real:.3f}")
-        fps = real
     height = int(info.get("height") or 0)
     if threshold is None and cfg.vr:
         from kukkiri.vr import THRESHOLD
@@ -415,16 +467,13 @@ def _remaster_once(
 
     t2 = time.time()
     scale_to = None if cfg.vr else _output_size(height, int(info.get("width") or 0), cfg.max_pixels)
-    max_fps = cfg.max_fps if cfg.max_fps is not None else (30.0 if cfg.ltx else 0.0)
-    stride = 1
-    while max_fps and fps / stride > max_fps * 1.05:
-        stride += 1
     if stride > 1:
         logger.info(f"{fps:.3f} fps source: restoring 1 frame in {stride} ({fps / stride:.3f} fps out)")
         fps, n_frames = fps / stride, -(-n_frames // stride)
+    rng = {"start": frame_range[0], "end": frame_range[1]} if frame_range else {}
     try:
         if device.pick() is Device.CUDA:
-            frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget())
+            frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget(), **rng)
         else:
             os.environ.setdefault("KUKKIRI_FRAME_BUDGET_GB", "2")
             frames = FfmpegFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=_frame_budget(), ffmpeg=ffmpeg)
@@ -438,8 +487,11 @@ def _remaster_once(
             raise
         logger.warning(f"{src.name}: GPU decoder cannot open the source: {' | '.join(str(e).strip().splitlines()[:3])}")
         raise SourceTruncated(0, n_frames, fps) from e
-    n_frames = n_frames or len(frames)
-    repeats = frame_repeats(src, fps, n_frames, float(info.get("duration") or 0)) if stride == 1 else None
+    n_all = n_frames
+    n_frames = len(frames) if frame_range else n_frames or len(frames)
+    repeats = frame_repeats(src, fps, n_all, float(info.get("duration") or 0)) if stride == 1 else None
+    if repeats and frame_range:
+        repeats = repeats[frame_range[0] : frame_range[1]]
     n_out = sum(repeats) if repeats else n_frames
     if repeats:
         logger.info(f"variable frame rate: {n_frames} frames over {info.get('duration')} s -> {n_out} at {fps:.3f} fps")
@@ -449,21 +501,23 @@ def _remaster_once(
     if src_bitrate and scale_to:
         src_bitrate = src_bitrate * (scale_to[0] * scale_to[1]) / (height * int(info.get("width") or 1))
     cap = int(min(max(bitrate_factor * src_bitrate, min_bitrate), max_bitrate)) if src_bitrate else None
+    if cap and cfg.codec == "hevc":
+        cap = int(cap * HEVC_BITRATE_SHARE)
     logger.info(f"encode: source {(input_bitrate or 0) / 1e6:.2f} Mbps -> cap {cap / 1e6 if cap else None} Mbps")
     dst.parent.mkdir(parents=True, exist_ok=True)
-    mux = LiveMuxer(
+    mux = _RawPart(dst) if part else LiveMuxer(
         src, dst, fps, n_out / fps, live_dir=Path(live_dir) if live_dir else None, ffmpeg=ffmpeg,
-        sar=info.get("sar"), size=(frames.hw[1], frames.hw[0]), rotation=info.get("rotation", 0),
+        sar=info.get("sar"), size=(frames.hw[1], frames.hw[0]), rotation=info.get("rotation", 0), codec=cfg.codec,
     )
     idr_period = mux.idr_period(fps) if live_dir else None
     if device.pick() is Device.CUDA:
         writer = GpuVideoWriter(
             work / "video.mp4", frames.hw[1], frames.hw[0], fps, qp=qp, ffmpeg=ffmpeg, max_bitrate=cap, preset=cfg.preset,
-            stream=mux.stdin, idr_period=idr_period,
+            stream=mux.stdin, idr_period=idr_period, codec=cfg.codec,
         )
     else:
         writer = FfmpegVideoWriter(frames.hw[1], frames.hw[0], fps, qp, mux.stdin, max_bitrate=cap, idr_period=idr_period,
-                                   ffmpeg=ffmpeg)
+                                   ffmpeg=ffmpeg, codec=cfg.codec)
     done = 0
     span = [0.0, 100.0]
     last = [0.0]
@@ -522,7 +576,7 @@ def _remaster_once(
                 progress(ProgressEvent(lo + (hi - lo) * k / n, stage, k, n, eta))
 
             pass_progress("detect", 0, n_frames)
-            plan_frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0, min_window=64)
+            plan_frames = SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0, min_window=64, **rng)
             events = staged.plan(lambda rec: _produce_jobs(detector, plan_frames, rec, gap, min_length, pstats,
                                                            cfg.cut_tv, cfg.vr, fisheye), plan_frames, len(frames),
                                 lambda k, n: pass_progress("detect", k, n))
@@ -540,7 +594,7 @@ def _remaster_once(
                 pass_progress("ltx", k, n)
 
             results = staged.ltx_pass(events, SharedFrameStore(src, scale_to=scale_to, stride=stride, budget_bytes=0,
-                                                               min_window=CLIP + 64), ltx,
+                                                               min_window=CLIP + 64, **rng), ltx,
                                       restorer.ltx_min_size, work / "ltx", ltx_progress)
             ltx = None
             staged.release_gpu()
@@ -621,7 +675,7 @@ def _remaster_once(
         height=frames.hw[0],
         fps=round(fps, 3),
         source_bitrate=int(input_bitrate or 0),
-        output_bitrate=int(probe(dst).get("bit_rate") or 0),
+        output_bitrate=0 if part else int(probe(dst).get("bit_rate") or 0),
         output_bytes=dst.stat().st_size,
         tracks=tracks,
     )

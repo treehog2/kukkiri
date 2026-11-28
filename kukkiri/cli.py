@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import sys
 import tempfile
 import traceback
@@ -26,7 +27,8 @@ def collect_videos(paths) -> list[Path]:
     for p in map(Path, paths):
         if p.is_dir():
             found = (f for f in p.rglob("*") if f.is_file() and f.suffix.lower() in VIDEO_EXTS)
-            out += sorted(f for f in found if OUTPUT_TAG not in f.stem)
+            out += sorted(f for f in found if OUTPUT_TAG not in f.stem and not any(
+                q.name.endswith(".kukkiri-job") for q in f.parents))
         else:
             out.append(p)
     return out
@@ -217,7 +219,7 @@ def _restore_one(src: Path, dst: Path, args) -> int:
             until = f"+ {args.duration}" if args.duration else "to the end"
             print(f"cutting {args.start or '0'} {until}", file=sys.stderr)
             section = cut_section(src, Path(tmp) / "section.mp4", start, duration, ffmpeg=args.ffmpeg)
-            return _run_remaster(remaster, section, dst, weights, args)
+            return _run_remaster(remaster, section, dst, weights, args, original=src, section=(start, duration))
     if not args.skip_check and not args.full_frame:
         from kukkiri.weights import detector_size, version_of
 
@@ -233,7 +235,8 @@ def _restore_one(src: Path, dst: Path, args) -> int:
     return _run_remaster(remaster, src, dst, weights, args)
 
 
-def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
+def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args, original: Path | None = None,
+                  section: tuple | None = None) -> int:
     import time
 
     first = {}
@@ -254,12 +257,28 @@ def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
                          max_pixels=1920 * 1088 if args.max_1080p else None,
                          threshold_scale=SENSITIVITY[args.sensitivity],
                          ltx=is_ltx(version), max_fps=0.0 if args.keep_fps else None, vr=getattr(args, "vr", None),
-                         vr_lens=getattr(args, "vr_lens", "equirect"), full_frame=args.full_frame)
+                         vr_lens=getattr(args, "vr_lens", "equirect"), full_frame=args.full_frame, codec=args.codec)
     existed = Path(dst).exists()
+    gpus = _split_gpus(args, src, dst, cfg)
+    if gpus:
+        from functools import partial
+
+        from kukkiri.split import remaster_split
+
+        minutes = float(os.environ.get("KUKKIRI_SPLIT_MINUTES", SPLIT_PART_MIN))
+        remaster = partial(remaster_split, gpus=gpus, part_minutes=minutes, original=original, section=section,
+                           restart=getattr(args, "restart", False))
+    from kukkiri.mux import partial_path
+
+    print(f"watch it while it restores: open {partial_path(dst)} in VLC once it appears", file=sys.stderr)
     try:
         r = remaster(src, dst, weights, config=cfg, threshold=args.threshold, ffmpeg=args.ffmpeg, progress=progress)
     except BaseException as e:
-        if not existed:
+        from kukkiri.split import JobBusy
+
+        if isinstance(e, JobBusy):
+            raise
+        if not existed and not gpus:
             Path(dst).unlink(missing_ok=True)
         if _out_of_ram(e):
             raise MemoryError("kukkiri ran out of system memory (RAM and page file). Close other programs, enlarge the "
@@ -274,6 +293,42 @@ def _run_remaster(remaster, src: Path, dst: Path, weights: Path, args) -> int:
 
         make_previews(src, Path(r.output), r, ffmpeg=args.ffmpeg, log=lambda m: print(m, file=sys.stderr))
     return 0
+
+
+SPLIT_PART_MIN = 10
+SPLIT_FROM_MIN = 15
+
+
+def _split_gpus(args, src: Path, dst: Path, cfg) -> list[int | None] | None:
+    from kukkiri.device import Device, pick
+    from kukkiri.split import job_dir
+
+    spec = getattr(args, "gpus", None)
+    if spec:
+        return _parse_gpus(spec)
+    if os.environ.get("KUKKIRI_SPLIT") == "0" or pick() is not Device.CUDA:
+        return None
+    if cfg.ltx:
+        from kukkiri.remaster import _ltx_staged
+
+        if _ltx_staged():
+            return None
+    if job_dir(dst).exists() and not getattr(args, "restart", False):
+        return [args.gpu]
+    from kukkiri.video_io import probe
+
+    return [args.gpu] if float(probe(src).get("duration") or 0) >= SPLIT_FROM_MIN * 60 else None
+
+
+def _parse_gpus(spec: str) -> list[int]:
+    n = _nvidia_gpu_count() or 1
+    try:
+        gpus = list(range(n)) if spec == "all" else [int(g) for g in spec.split(",")]
+    except ValueError:
+        raise SystemExit(f"error: --gpus {spec}: give GPU numbers like 0,1, or all") from None
+    if not gpus or any(not 0 <= g < n for g in gpus):
+        raise SystemExit(f"error: --gpus {spec}: this machine has " + ("GPU 0" if n == 1 else f"GPUs 0 to {n - 1}"))
+    return gpus
 
 
 def _out_of_ram(e: BaseException) -> bool:
@@ -381,6 +436,16 @@ def _check(args) -> int:
     return 0
 
 
+def _nvidia_gpu_count() -> int | None:
+    import subprocess
+
+    try:
+        out = subprocess.run(["nvidia-smi", "-L"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return sum(line.startswith("GPU ") for line in out.stdout.splitlines()) if out.returncode == 0 else None
+
+
 def main(argv: list[str] | None = None) -> None:
     p = argparse.ArgumentParser(prog="kukkiri", description="Restore mosaic-censored video, or add mosaics.")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -413,7 +478,14 @@ def main(argv: list[str] | None = None) -> None:
                    help="with --vr, the image the studio pixelated: equirect (default), or fisheye for studios whose "
                    "mosaic was pixelated in the camera's fisheye image (its blocks bend into fans near the bottom of "
                    "each eye)")
+    r.add_argument("--codec", choices=["h264", "hevc"], default="h264", help="output video: h264 (plays everywhere, "
+                   "default) or hevc (about a third smaller at the same quality; needs a newer player)")
     r.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
+    r.add_argument("--gpu", type=int, help="which NVIDIA GPU to use, numbered as in nvidia-smi (default: the first)")
+    r.add_argument("--gpus", help="restore each video split across these NVIDIA GPUs at once, e.g. 0,1 or all; an "
+                   "interrupted run resumes when run again")
+    r.add_argument("--restart", action="store_true", help="with --gpus: start over instead of resuming an "
+                   "unfinished split restore")
     r.add_argument("-v", "--verbose", action="store_true")
     m = sub.add_parser("add-mosaic", help="add mosaics: a block mosaic where a censored release would have one")
     m.add_argument("input", nargs="+", help="video files and/or folders (searched recursively)")
@@ -428,8 +500,14 @@ def main(argv: list[str] | None = None) -> None:
     m.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder); "
                    "missing weights are downloaded on first use")
     m.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
+    m.add_argument("--gpu", type=int, help="which NVIDIA GPU to use, numbered as in nvidia-smi (default: the first)")
     m.add_argument("-v", "--verbose", action="store_true")
     m.set_defaults(model=None, start=None, duration=None, vr=None)
+    w = sub.add_parser("_parts")
+    w.add_argument("job")
+    w.add_argument("parts")
+    w.add_argument("--weights", required=True)
+    w.add_argument("--ffmpeg", default=tool("ffmpeg"))
     d = sub.add_parser("download-weights", help="download and verify the model weights")
     d.add_argument("dest", nargs="?", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
     d.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
@@ -438,13 +516,39 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--weights", help="weights directory (default: KUKKIRI_WEIGHTS or a per-user folder)")
     c.add_argument("--model", help=f"which model: {', '.join(MODELS)} (default: the latest)")
     c.add_argument("--ffmpeg", default=tool("ffmpeg"), help="ffmpeg binary")
+    c.add_argument("--gpu", type=int, help="which NVIDIA GPU to use, numbered as in nvidia-smi (default: the first)")
     args = p.parse_args(argv)
+    if getattr(args, "gpus", None):
+        args.gpu = _parse_gpus(args.gpus)[0]
+    if getattr(args, "gpu", None) is not None:
+        n = _nvidia_gpu_count()
+        if n is not None and not 0 <= args.gpu < n:
+            print(f"error: --gpu {args.gpu}: this machine has " + ("GPU 0" if n == 1 else f"GPUs 0 to {n - 1}"),
+                  file=sys.stderr)
+            sys.exit(1)
+        os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+        os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu)
     problem = env_problem()
     if problem:
         print(f"error: {problem}", file=sys.stderr)
         sys.exit(1)
     if args.cmd == "check":
         sys.exit(_check(args))
+    if args.cmd == "_parts":
+        from kukkiri.split import run_parts
+
+        logging.basicConfig(level=logging.WARNING, format="%(name)s: %(message)s")
+        try:
+            run_parts(Path(args.job), [int(i) for i in args.parts.split(",")], Path(args.weights), ffmpeg=args.ffmpeg)
+            rc = 0
+        except SystemExit as e:
+            rc = e.code if isinstance(e.code, int) else 1
+        except BaseException:
+            traceback.print_exc()
+            rc = 1
+        sys.stdout.flush()
+        sys.stderr.flush()
+        os._exit(rc)
     if args.cmd == "download-weights":
         from kukkiri.weights import default_dir, download, version_of
 
@@ -470,9 +574,11 @@ def main(argv: list[str] | None = None) -> None:
             hint = " (brew install ffmpeg)" if sys.platform == "darwin" else ""
             print(f"error: {Path(e.filename).name} was not found: install ffmpeg{hint}", file=sys.stderr)
             sys.exit(1)
-        import os
-        import traceback
+        from kukkiri.split import BUSY_EXIT, JobBusy
 
+        if isinstance(e, JobBusy):
+            print(f"error: {e}", file=sys.stderr, flush=True)
+            os._exit(BUSY_EXIT)
         traceback.print_exc()
         sys.stdout.flush()
         sys.stderr.flush()

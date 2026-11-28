@@ -127,8 +127,15 @@ watermark in the top right corner and have no sound, ready to share. The restore
 
 ## Stop, and files that fail
 
-**Stop** ends the video being restored, deletes its unfinished output and pauses the queue. The rest of the queue
-stays **Waiting**; click **Start** to continue.
+**Watch** plays the video being restored while it is restored: it opens in VLC and keeps playing as the restore goes
+on (double-clicking the row does the same). Without VLC installed, kukkiri says where to get it. With kiyo-ltx on a
+GPU with less than 15 GB of memory, the video is restored in three passes and only written in the last one, so Watch
+turns on near the end of each video there.
+
+**Stop** ends the video being restored and pauses the queue; its row says **Stopped** and the rest of the queue stays
+**Waiting**. Click **Start** to continue: a video of 15 minutes or more carries on from the parts it has finished
+(kept in a `.kukkiri-job` folder next to its output), a shorter one starts again. **Remove** on a stopped row deletes
+those parts.
 
 If a file cannot be read, for example because it is damaged or not really a video, its row says **Failed** and the
 **Log** below the queue explains why. The queue carries on with the next video.

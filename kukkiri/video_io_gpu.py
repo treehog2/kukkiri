@@ -143,6 +143,20 @@ def _decoded_hw(video: Path, meta, gpu_id: int = 0) -> tuple[int, int]:
         return hw
 
 
+def _decode(store, n: int, keep=None) -> tuple[list[torch.Tensor], int]:
+    out, got = [], 0
+    while got < n:
+        with _NVC_LOCK:
+            fr = store.dec.get_batch_frames(1)
+        if not fr:
+            break
+        if keep is None or keep(got):
+            out += GpuFrameStore._convert(store, fr)
+            torch.cuda.current_stream().synchronize()
+        got += 1
+    return out, got
+
+
 class GpuFrameStore:
 
     def __init__(
@@ -176,12 +190,11 @@ class GpuFrameStore:
     def __getitem__(self, i: int) -> torch.Tensor:
         with self._lock:
             while i >= self._next:
-                with _NVC_LOCK:
-                    frames = self.dec.get_batch_frames(self.batch)
+                frames, _ = _decode(self, self.batch)
                 if not frames:
                     self.n = self._next
                     raise IndexError(i)
-                for t in self._convert(frames):
+                for t in frames:
                     self._buf[self._next] = t
                     self._next += 1
                 torch.cuda.current_stream().synchronize()
@@ -194,11 +207,9 @@ class GpuFrameStore:
 
     def iter_batches(self):
         while True:
-            with _NVC_LOCK:
-                frames = self.dec.get_batch_frames(self.batch)
-            if not frames:
+            batch, _ = _decode(self, self.batch)
+            if not batch:
                 return
-            batch = self._convert(frames)
             torch.cuda.current_stream().synchronize()
             yield batch
 
@@ -228,6 +239,8 @@ class SharedFrameStore:
         budget_bytes: int = 6 << 30,
         min_window: int = 256,
         stride: int = 1,
+        start: int = 0,
+        end: int | None = None,
     ):
         import PyNvVideoCodec as nvc
         from PyNvVideoCodec.decoders.SimpleDecoder import SimpleDecoder
@@ -235,8 +248,13 @@ class SharedFrameStore:
         self.dec = SimpleDecoder(str(video), gpu_id, 0, 0, True, 0, 0, 0, 4, nvc.OutputColorType.RGB)
         meta = self.dec.get_stream_metadata()
         self.stride = stride
-        self._src = 0
-        self.n = -(-int(meta.num_frames) // stride)
+        total = int(meta.num_frames)
+        self._end = end
+        if start:
+            with _NVC_LOCK:
+                self.dec.seek_to_index(start)
+        self._src = start
+        self.n = len(range(-(-start // stride) * stride, total if end is None else end, stride))
         self.hw = _decoded_hw(video, meta, gpu_id)
         self.fps = float(meta.average_fps) / stride
         self.device, self.batch = device, batch
@@ -260,16 +278,16 @@ class SharedFrameStore:
                 with self._cv:
                     while self._head - self._low > self.max_window:
                         self._cv.wait(timeout=0.5)
-                with _NVC_LOCK:
-                    frames = self.dec.get_batch_frames(self.batch)
-                if not frames:
+                want = self.batch if self._end is None else min(self.batch, self._end - self._src)
+                if want <= 0:
                     return
-                if self.stride > 1:
-                    first, self._src = self._src, self._src + len(frames)
-                    frames = [f for k, f in enumerate(frames) if (first + k) % self.stride == 0]
-                    if not frames:
-                        continue
-                batch = GpuFrameStore._convert(self, frames)
+                first = self._src
+                batch, got = _decode(self, want, keep=lambda k: (first + k) % self.stride == 0)
+                if not got:
+                    return
+                self._src += got
+                if not batch:
+                    continue
                 torch.cuda.current_stream().synchronize()
                 with self._cv:
                     for t in batch:
@@ -314,11 +332,12 @@ class GpuVideoWriter:
         multipass: bool = False,
         stream=None,
         idr_period: int | None = None,
+        codec: str = "h264",
     ):
         import PyNvVideoCodec as nvc
 
         self.out, self.fps, self.ffmpeg = Path(out), fps, ffmpeg
-        self.raw = self.out.with_suffix(".h264")
+        self.raw = self.out.with_suffix(f".{codec}")
         self._stream = stream
         if max_bitrate:
             cap = int(max_bitrate)
@@ -327,17 +346,19 @@ class GpuVideoWriter:
                 rc["multipass"] = "fullres"
         else:
             rc = dict(rc="constqp", constqp=qp)
+        refs = {"numrefl0": 1} if torch.cuda.get_device_capability() < (8, 9) else {}
         self.enc = nvc.CreateEncoder(
             width,
             height,
             "ABGR",
             False,
-            codec="h264",
+            codec=codec,
             preset=preset,
             tuning_info="high_quality",
             fps=fps,
             bf=0,
             **({"idrperiod": int(idr_period)} if idr_period else {}),
+            **refs,
             **rc,
         )
         self._f = stream if stream is not None else open(self.raw, "wb")

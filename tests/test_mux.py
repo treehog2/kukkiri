@@ -78,3 +78,115 @@ def test_a_phone_video_keeps_its_rotation(tmp_path):
     m.stdin.write(enc)
     m.close()
     assert probe(tmp_path / "out.mp4")["rotation"] == 90
+
+
+def test_the_restore_plays_while_it_is_written(tmp_path):
+    from kukkiri.mux import partial_path
+
+    src, raw = tmp_path / "src.mp4", tmp_path / "v.h264"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=size=320x240:rate=25:duration=30",
+                    "-f", "lavfi", "-i", "sine=duration=30", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-i", str(src), "-an", "-c:v", "libx264", "-bf", "0",
+                    "-f", "h264", str(raw)], check=True)
+    data = raw.read_bytes()
+    m = LiveMuxer(src, tmp_path / "o.mp4", 25.0, 30.0)
+    m.stdin.write(data[: len(data) // 2])
+    m.stdin.flush()
+    time.sleep(3)
+    part = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration", "-of", "csv=p=0",
+                           str(partial_path(tmp_path / "o.mp4"))], capture_output=True, text=True).stdout.split()
+    m.stdin.write(data[len(data) // 2 :])
+    m.close()
+    durations = dict(line.split(",") for line in part)
+    assert 5 < float(durations["video"]) < 20 and 5 < float(durations["audio"]) < 21
+
+
+def _source(path, seconds, audio):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", f"testsrc2=size=320x240:rate=25:duration={seconds}",
+                    "-f", "lavfi", "-i", f"sine=duration={seconds}", "-pix_fmt", "yuv420p", *audio, str(path)], check=True)
+    return path
+
+
+def _raw(src, path, codec="libx264"):
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-i", str(src), "-an", "-c:v", codec, "-bf", "0",
+                    "-f", "hevc" if codec == "libx265" else "h264", str(path)], check=True)
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("audio", [["-c:a", "ac3"], ["-c:a", "eac3"]])
+def test_dolby_audio_sources_mux(tmp_path, audio):
+    src = _source(tmp_path / "src.mp4", 4, audio)
+    m = LiveMuxer(src, tmp_path / "o.mp4", 25.0, 4.0)
+    m.stdin.write(_raw(src, tmp_path / "v.h264"))
+    m.close()
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_name", "-of", "csv=p=0", str(tmp_path / "o.mp4")],
+                         capture_output=True, text=True, check=True).stdout.split()
+    assert [c.strip(",") for c in out] == ["h264", audio[1]]
+
+
+def test_a_failed_final_pass_keeps_the_restore(tmp_path):
+    src = _source(tmp_path / "src.mp4", 3, ["-c:a", "aac"])
+    m = LiveMuxer(src, tmp_path / "o.mp4", 25.0, 3.0, ffmpeg="false")
+    m.stdin.write(_raw(src, tmp_path / "v.h264"))
+    with pytest.raises(RuntimeError, match="unfinished"):
+        m.close()
+    kept = tmp_path / "o.unfinished.mp4"
+    assert kept.exists() and not (tmp_path / "o.mp4.part").exists()
+    out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "stream=codec_type", "-of", "csv=p=0", str(kept)],
+                         capture_output=True, text=True, check=True).stdout.split()
+    assert out == ["video", "audio"]
+
+
+def test_an_hevc_restore_plays_while_written_and_is_tagged_for_apple(tmp_path):
+    from kukkiri.mux import partial_path
+
+    src = _source(tmp_path / "src.mp4", 20, ["-c:a", "aac"])
+    data = _raw(src, tmp_path / "v.hevc", "libx265")
+    m = LiveMuxer(src, tmp_path / "o.mp4", 25.0, 20.0, codec="hevc")
+    m.stdin.write(data[: len(data) // 2])
+    m.stdin.flush()
+    time.sleep(3)
+    probe = ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_tag_string,duration", "-of", "csv=p=0"]
+    mid = subprocess.run(probe + [str(partial_path(tmp_path / "o.mp4"))], capture_output=True, text=True).stdout.strip()
+    m.stdin.write(data[len(data) // 2 :])
+    m.close()
+    final = subprocess.run(probe + [str(tmp_path / "o.mp4")], capture_output=True, text=True, check=True).stdout.strip()
+    assert mid.startswith("hvc1,") and float(mid.split(",")[1]) > 3
+    assert final.startswith("hvc1,") and abs(float(final.split(",")[1]) - 20) < 0.1
+
+
+def test_every_frame_comes_through_written_in_encoder_sized_pieces(tmp_path):
+    av = pytest.importorskip("av")
+    import hashlib
+
+    src, raw = tmp_path / "src.mp4", tmp_path / "v.h264"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-f", "lavfi", "-i", "testsrc2=size=640x360:rate=25:duration=12",
+                    "-f", "lavfi", "-i", "sine=duration=12", "-pix_fmt", "yuv420p", "-c:a", "aac", str(src)], check=True)
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-nostdin", "-i", str(src), "-an", "-c:v", "libx264", "-bf", "0", "-g", "300",
+                    "-f", "h264", str(raw)], check=True)
+
+    def frames(path, fmt=None):
+        with av.open(str(path), format=fmt) as c:
+            return [hashlib.md5(f.to_ndarray(format="gray").tobytes()).hexdigest() for f in c.decode(c.streams.video[0])]
+
+    data, sizes, i = raw.read_bytes(), (300, 4096, 30000, 70000), 0
+    m = LiveMuxer(src, tmp_path / "o.mp4", 25.0, 12.0)
+    while i < len(data):
+        n = sizes[i % len(sizes)]
+        m.stdin.write(data[i : i + n])
+        i += n
+    m.close()
+    assert frames(tmp_path / "o.mp4") == frames(raw, "h264")
+
+
+def test_the_muxer_reads_its_pipe_as_never_seekable():
+    import os
+
+    from kukkiri.mux import _PipeReader
+
+    r, w = os.pipe()
+    reader = _PipeReader(r)
+    os.write(w, b"abc")
+    os.close(w)
+    assert not reader.seekable() and reader.read(10) == b"abc" and reader.read(10) == b""
+    reader.close()

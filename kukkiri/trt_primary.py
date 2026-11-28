@@ -92,8 +92,15 @@ class TrtPrimary:
             if self.cache_dir is not None:
                 name = engine_names(tensorrt.__version__.split(".")[0], (self.B,))[BRANCHES.index(br)]
                 path = self.cache_dir / Path(name).name
+            if path is not None:
+                from kukkiri.trt_compat import adopt_untagged, gpu_tag
+
+                adopt_untagged(path, gpu_tag())
             if path is not None and path.exists():
-                return _GraphedStep(torch_tensorrt.load(str(path)).module(), ex)
+                try:
+                    return _GraphedStep(torch_tensorrt.load(str(path)).module(), ex)
+                except Exception:
+                    pass
             with torch.no_grad():
                 trt_mod = torch_tensorrt.compile(
                     step,
@@ -163,4 +170,6 @@ class TrtPrimary:
 
 
 def engine_names(trt_major: str, batches=STEP_BATCHES) -> list[str]:
-    return [f"primary_steps/step_{br}_b{B}_trt{trt_major}.ep" for B in batches for br in BRANCHES]
+    from kukkiri.trt_compat import gpu_tag
+
+    return [f"primary_steps/step_{br}_b{B}_trt{trt_major}_{gpu_tag()}.ep" for B in batches for br in BRANCHES]

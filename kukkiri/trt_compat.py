@@ -8,6 +8,25 @@ def trt_major(trt) -> int:
     return int(trt.__version__.split(".")[0])
 
 
+def gpu_tag() -> str:
+    import torch
+
+    major, minor = torch.cuda.get_device_capability()
+    return f"sm{major}{minor}"
+
+
+def adopt_untagged(path, tagged: str) -> None:
+    from pathlib import Path
+
+    path = Path(path)
+    old = path.with_name(path.name.replace(f"_{tagged}", ""))
+    if not path.exists() and old != path and old.exists():
+        try:
+            old.replace(path)
+        except OSError:
+            pass
+
+
 def strongly_typed(trt) -> bool:
     return not hasattr(trt.BuilderFlag, "FP16")
 

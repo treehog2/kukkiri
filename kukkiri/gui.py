@@ -14,6 +14,7 @@ from kukkiri.cli import LTX_MIN_VRAM_GB, VIDEO_EXTS, _seconds, collect_videos
 from kukkiri.constants import DISCORD_INVITES, HF_REPO, PUBLIC_REPO
 from kukkiri.i18n import LANGUAGES, set_language, system_language, tr
 from kukkiri.mux import partial_path
+from kukkiri.split import BUSY_EXIT, job_dir
 from kukkiri.weights import MODELS as ALL_MODELS
 from kukkiri.weights import default_dir, download_size, is_ltx, missing, version_of
 
@@ -52,6 +53,7 @@ _LOG_NOISE_RE = re.compile(
     r"|rf-detr - (Using a different number of positional encodings|Using patch size|Checkpoint has \d+ classes)"
     r"|tensorrt\.plugin module is experimental|Unable to import quantiz|torch\._opaque_base is deprecated"
     r"|register_opaque_type is deprecated|typ='reference' is deprecated|Not enough SMs to use max_autotune"
+    r"|^watch it while it restores:"
 )
 _NOISE_RE = re.compile(r"WARN|Warning|^W\d{4} |\[TRT\] \[W\]|^PyNvVideoCodec:|Unable to import quantiz")
 
@@ -287,14 +289,14 @@ class CheckDialog(QDialog):
 
 class Meters:
 
-    def __init__(self) -> None:
+    def __init__(self, gpu: int = 0) -> None:
         self.gpu = None
         try:
             import pynvml
 
             pynvml.nvmlInit()
             self.nvml = pynvml
-            self.gpu = pynvml.nvmlDeviceGetHandleByIndex(0)
+            self.gpu = pynvml.nvmlDeviceGetHandleByIndex(gpu)
         except Exception:
             pass
         try:
@@ -329,17 +331,57 @@ def _output_name(job: Job, model: str) -> str:
 APP_DEFAULT_MODEL = "kiyo-ltx-v1"
 
 
-def _default_model(vr: bool) -> str:
-    if vr or APP_DEFAULT_MODEL not in MODELS:
-        return MODELS[0]
+ALL_GPUS = -1
+
+
+def _nvidia_gpus() -> list[tuple[int, str, float]]:
     try:
         import pynvml
 
         pynvml.nvmlInit()
-        gb = pynvml.nvmlDeviceGetMemoryInfo(pynvml.nvmlDeviceGetHandleByIndex(0)).total / 2**30
+        out = []
+        for i in range(pynvml.nvmlDeviceGetCount()):
+            h = pynvml.nvmlDeviceGetHandleByIndex(i)
+            name = pynvml.nvmlDeviceGetName(h)
+            out.append((i, name.decode() if isinstance(name, bytes) else name, pynvml.nvmlDeviceGetMemoryInfo(h).total / 2**30))
+        return out
     except Exception:
-        return MODELS[0]
-    return APP_DEFAULT_MODEL if gb >= LTX_MIN_VRAM_GB else MODELS[0]
+        return []
+
+
+def _default_model(vr: bool, gpus: list[tuple[int, str, float]], gpu: int) -> str:
+    gb = next((g for i, _, g in gpus if i == gpu), 0.0)
+    return APP_DEFAULT_MODEL if not vr and APP_DEFAULT_MODEL in MODELS and gb >= LTX_MIN_VRAM_GB else MODELS[0]
+
+
+STAGED_LTX_GB = 15
+
+
+def find_player() -> list[str] | None:
+    import shutil
+
+    if sys.platform == "win32":
+        found = []
+        try:
+            import winreg
+
+            for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
+                try:
+                    with winreg.OpenKey(root, r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\vlc.exe") as k:
+                        found.append(winreg.QueryValue(k, None))
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+        found += [str(Path(os.environ[v]) / "VideoLAN" / "VLC" / "vlc.exe")
+                  for v in ("ProgramFiles", "ProgramFiles(x86)") if os.environ.get(v)]
+        found.append(shutil.which("vlc"))
+        player = next((f for f in found if f and Path(f).is_file()), None)
+        return [player] if player else None
+    if sys.platform == "darwin":
+        return ["open", "-a", "VLC"] if Path("/Applications/VLC.app").exists() else None
+    player = shutil.which("vlc")
+    return [player] if player else None
 
 
 def _remove_partial(output: Path | None) -> None:
@@ -353,10 +395,12 @@ def _remove_partial(output: Path | None) -> None:
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
+        from kukkiri import __version__
+
+        self.setWindowTitle(f"kukkiri {__version__}")
         if not QApplication.instance().property("kukkiri_theme"):
             apply_theme(QApplication.instance())
             QApplication.instance().setProperty("kukkiri_theme", True)
-        self.setWindowTitle("kukkiri")
         self.resize(1040, 640)
         self.setAcceptDrops(True)
         self.settings = QSettings("kukkiri", "kukkiri")
@@ -368,7 +412,8 @@ class MainWindow(QMainWindow):
         self._partial = ""
         self._skip_reason = ""
         self._texts: list[tuple] = []
-        self._status_key = "Add videos or drop them here. Double-click a finished row to open it."
+        self._hint = "Add videos or drop them here. Double-click a row to watch it while it is restored, or to open it when done."
+        self._status_key = self._hint
 
         self.language = QComboBox()
         for code, name in LANGUAGES.items():
@@ -392,7 +437,16 @@ class MainWindow(QMainWindow):
         for m in MODELS:
             self.model.addItem(m, m)
         saved = self.settings.value("model", "")
-        start = saved if saved in MODELS else _default_model(bool(self.settings.value("vr", "")))
+        self.gpus = _nvidia_gpus()
+        self.gpu = QComboBox()
+        for i, name, gb in self.gpus:
+            self.gpu.addItem(f"GPU {i}: {name} ({gb:.0f} GB)", i)
+        if len(self.gpus) > 1:
+            self.gpu.addItem(tr("All GPUs (each video split across them)"), ALL_GPUS)
+            self._t(lambda text: self.gpu.setItemText(self.gpu.count() - 1, text), "All GPUs (each video split across them)")
+        self.gpu.setCurrentIndex(max(0, self.gpu.findData(int(self.settings.value("gpu", 0) or 0))))
+        self.gpu.currentIndexChanged.connect(self._gpu_changed)
+        start = saved if saved in MODELS else _default_model(bool(self.settings.value("vr", "")), self.gpus, max(0, self._gpu()))
         self.model.setCurrentIndex(max(0, self.model.findData(start)))
         self.weights = QLineEdit(self.settings.value("weights", "") or str(default_dir(self._version())))
         self.model.currentIndexChanged.connect(self._model_changed)
@@ -412,6 +466,12 @@ class MainWindow(QMainWindow):
             self._t(lambda text, i=self.vr.count() - 1: self.vr.setItemText(i, text), key)
         self.vr.setCurrentIndex(max(0, self.vr.findData(self.settings.value("vr", ""))))
         self.vr.currentIndexChanged.connect(lambda: self.settings.setValue("vr", self.vr.currentData()))
+        self.codec = QComboBox()
+        for key, value in (("H.264 (plays everywhere)", "h264"), ("HEVC (smaller files, needs a newer player)", "hevc")):
+            self.codec.addItem(tr(key), value)
+            self._t(lambda text, i=self.codec.count() - 1: self.codec.setItemText(i, text), key)
+        self.codec.setCurrentIndex(max(0, self.codec.findData(self.settings.value("codec", "h264"))))
+        self.codec.currentIndexChanged.connect(lambda: self.settings.setValue("codec", self.codec.currentData()))
         self.max_1080p = QCheckBox()
         self.skip_check = QCheckBox()
         self.keep_fps = QCheckBox()
@@ -424,7 +484,9 @@ class MainWindow(QMainWindow):
         form = QFormLayout()
         for key, field in (("Model", self.model), ("Weights folder", self._with_browse(self.weights, "weights")),
                            ("Output folder", self._with_browse(self.outdir, "outdir")),
-                           ("Detection sensitivity", self.sensitivity), *([] if MAC else [("VR video", self.vr)]), ("", self.max_1080p),
+                           ("Detection sensitivity", self.sensitivity), *([] if MAC else [("VR video", self.vr)]),
+                           ("Video format", self.codec), *([("GPU", self.gpu)] if len(self.gpus) > 1 else []),
+                           ("", self.max_1080p),
                            ("", self.skip_check),
                            ("", self.keep_fps)):
             label = QLabel()
@@ -461,12 +523,21 @@ class MainWindow(QMainWindow):
         self.cancel_btn = QPushButton()
         self.cancel_btn.clicked.connect(self._cancel)
         self.cancel_btn.setEnabled(False)
+        self.watch_btn = QPushButton()
+        self.watch_btn.clicked.connect(lambda: self._watch(self.current))
+        self.watch_btn.setEnabled(False)
         buttons = QHBoxLayout()
         for b in (self.add_btn, self.folder_btn, self.remove_btn, self.advanced_btn):
             buttons.addWidget(b)
         buttons.addStretch(1)
-        for b in (self.previews, self.run_btn, self.cancel_btn):
+        for b in (self.previews, self.watch_btn, self.run_btn, self.cancel_btn):
             buttons.addWidget(b)
+        self._watch_index = None
+        self._watched: set = set()
+        self._leftovers: list[Path] = []
+        self._watch_timer = QTimer(self)
+        self._watch_timer.timeout.connect(self._update_watch)
+        self._watch_timer.start(1000)
 
         self.log = QPlainTextEdit()
         self.log.setReadOnly(True)
@@ -488,6 +559,8 @@ class MainWindow(QMainWindow):
                             (self.advanced_btn.setText, "Advanced"),
                             (self.previews.setText, "Before/after previews"),
                             (self.run_btn.setText, "Start"), (self.cancel_btn.setText, "Stop"),
+                            (self.watch_btn.setText, "Watch"),
+                            (self.watch_btn.setToolTip, "Play the video being restored while it is restored, in VLC"),
                             (log_label.setText, "Log"), (self.outdir.setPlaceholderText, "next to each input"),
                             (self.save_log_btn.setText, "Save log"),
                             (self.support_btn.setText, "Support"),
@@ -506,7 +579,7 @@ class MainWindow(QMainWindow):
         w.setLayout(root)
         self.setCentralWidget(w)
 
-        self.meters = Meters()
+        self.meters = Meters(max(0, self._gpu()))
         self.meter_label = QLabel()
         self.statusBar().addPermanentWidget(self.meter_label)
         self._timer = QTimer(self)
@@ -600,7 +673,21 @@ class MainWindow(QMainWindow):
 
     def _system_check(self) -> None:
         CheckDialog(self, ["-m", "kukkiri", "check", "--weights", self.weights.text(),
-                           "--model", self.model.currentData()]).exec()
+                           "--model", self.model.currentData(),
+                           *(["--gpu", "0"] if self._gpu() == ALL_GPUS else self._gpu_args())]).exec()
+
+    def _gpu(self) -> int:
+        return self.gpu.currentData() if self.gpu.count() else 0
+
+    def _gpu_args(self) -> list[str]:
+        if len(self.gpus) < 2:
+            return []
+        return ["--gpus", "all"] if self._gpu() == ALL_GPUS else ["--gpu", str(self._gpu())]
+
+    def _gpu_changed(self) -> None:
+        self.settings.setValue("gpu", self._gpu())
+        if hasattr(self, "meters"):
+            self.meters = Meters(max(0, self._gpu()))
 
 
     def _version(self) -> str:
@@ -662,14 +749,21 @@ class MainWindow(QMainWindow):
         if d.exec() == QDialog.DialogCode.Accepted and job in self.jobs:
             self.set_section(self.jobs.index(job), d.start.text(), d.duration.text())
 
+    def _last_folder(self) -> str:
+        last = self.settings.value("last_folder", "") or ""
+        return last if last and Path(last).is_dir() else str(Path.home())
+
     def _pick_files(self) -> None:
         exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))
-        files, _ = QFileDialog.getOpenFileNames(self, tr("Add videos"), str(Path.home()), f"{tr('Videos')} ({exts})")
+        files, _ = QFileDialog.getOpenFileNames(self, tr("Add videos"), self._last_folder(), f"{tr('Videos')} ({exts})")
+        if files:
+            self.settings.setValue("last_folder", str(Path(files[0]).parent))
         self.add_files(files)
 
     def _pick_folder(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, tr("Add a folder of videos"), str(Path.home()))
+        d = QFileDialog.getExistingDirectory(self, tr("Add a folder of videos"), self._last_folder())
         if d:
+            self.settings.setValue("last_folder", str(Path(d).parent))
             self.add_files([d])
 
     def dragEnterEvent(self, e):
@@ -680,9 +774,25 @@ class MainWindow(QMainWindow):
         self.add_files([u.toLocalFile() for u in e.mimeData().urls()])
 
     def _remove_selected(self) -> None:
+        import shutil
+
         for r in sorted({i.row() for i in self.table.selectedIndexes()}, reverse=True):
             if r == self.current:
                 continue
+            job = self.jobs[r]
+            if job.status == "Stopped" and job.output:
+                from kukkiri.split import JobBusy, _lock, _unlock
+
+                try:
+                    held = _lock(job_dir(job.output))
+                except (JobBusy, OSError):
+                    held = None
+                if held is not None:
+                    try:
+                        shutil.rmtree(job_dir(job.output), ignore_errors=True)
+                        _remove_partial(job.output)
+                    finally:
+                        _unlock(job_dir(job.output), held)
             self.table.removeRow(r)
             del self.jobs[r]
             if self.current is not None and r < self.current:
@@ -710,12 +820,16 @@ class MainWindow(QMainWindow):
                      model=self.model.currentData(), weights=weights, size=download_size(self._version()))
             if QMessageBox.question(self, "kukkiri", msg) != QMessageBox.StandardButton.Yes:
                 return
+        for i, j in enumerate(self.jobs):
+            if j.status not in ("Waiting", "Stopped", "Done"):
+                self._set(i, "Waiting", 0, "", "")
         self.run_btn.setEnabled(False)
         self.cancelled = False
+        self._status(self._hint)
         self._next()
 
     def _next(self) -> None:
-        waiting = [i for i, j in enumerate(self.jobs) if j.status == "Waiting"]
+        waiting = [i for i, j in enumerate(self.jobs) if j.status in ("Waiting", "Stopped")]
         self.current = waiting[0] if waiting and not self.cancelled else None
         if self.current is None:
             self.run_btn.setEnabled(True)
@@ -744,6 +858,9 @@ class MainWindow(QMainWindow):
             args.append("--keep-fps")
         if self.vr.currentData() and not MAC:
             args += ["--vr", "sbs"] + (["--vr-lens", "fisheye"] if self.vr.currentData() == "sbs-fisheye" else [])
+        args += self._gpu_args()
+        if self.codec.currentData() != "h264":
+            args += ["--codec", self.codec.currentData()]
         if job.start:
             args += ["--start", job.start]
         if job.duration:
@@ -754,6 +871,7 @@ class MainWindow(QMainWindow):
         self.proc = QProcess(self)
         env = QProcessEnvironment.systemEnvironment()
         env.insert("PYTHONWARNINGS", "ignore")
+        env.insert("KUKKIRI_KEEP_PART", "1")
         self.proc.setProcessEnvironment(env)
         self.proc.setProcessChannelMode(QProcess.ProcessChannelMode.MergedChannels)
         self.proc.readyReadStandardOutput.connect(self._read)
@@ -801,8 +919,9 @@ class MainWindow(QMainWindow):
 
     def _finished(self, code: int, _status) -> None:
         row, job = self.current, self.jobs[self.current]
+        self._end_watch(row, done=(code == 0 or self._done) and not (self.cancelled and not self._done))
         if self.cancelled and not self._done:
-            self._set(row, "Cancelled", 0, "", "")
+            self._set(row, "Stopped", 0, "", "")
             if job.output and job.output.exists():
                 job.output.unlink()
             _remove_partial(job.output)
@@ -813,7 +932,8 @@ class MainWindow(QMainWindow):
             self._set(row, "Skipped: {reason}", 0, "", "", reason=tr(reason))
         else:
             self._set(row, "Failed (exit {code}), see log", None, "", "", code=code)
-            _remove_partial(job.output)
+            if code != BUSY_EXIT:
+                _remove_partial(job.output)
         self.proc = None
         self._next()
 
@@ -828,9 +948,78 @@ class MainWindow(QMainWindow):
     def _open_output(self, row: int, col: int) -> None:
         if col == _TRIM:
             return
+        if row == self.current and self.proc is not None:
+            self._watch(row)
+            return
         out = self.jobs[row].output
         if out and out.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+
+    def _watchable(self, row: int | None) -> Path | None:
+        from kukkiri.watch import FragmentIndex, playlist_path
+
+        if row is None or row != self.current or self.proc is None or not self.jobs[row].output:
+            return None
+        part = partial_path(self.jobs[row].output)
+        if self._watch_index is None or self._watch_index.part != part:
+            self._watch_index = FragmentIndex(part)
+        if not part.exists():
+            return None
+        playlist = playlist_path(part)
+        try:
+            return playlist if self._watch_index.write(playlist) else None
+        except OSError:
+            return None
+
+    def _update_watch(self) -> None:
+        self.watch_btn.setEnabled(self._watchable(self.current) is not None)
+        tip = tr("Play the video being restored while it is restored, in VLC")
+        gpu = self._gpu()
+        gbs = [gb for i, _, gb in self.gpus if gpu in (i, ALL_GPUS)]
+        if is_ltx(version_of(self.model.currentData())) and gbs and min(gbs) < STAGED_LTX_GB:
+            tip += "\n" + tr("With kiyo-ltx on a GPU with less than 15 GB of memory the video is restored in passes and "
+                             "written in the last one: Watch turns on near the end.")
+        if self.watch_btn.toolTip() != tip:
+            self.watch_btn.setToolTip(tip)
+
+    def _end_watch(self, row: int, done: bool) -> None:
+        from kukkiri.watch import playlist_path
+
+        job, index, self._watch_index = self.jobs[row], self._watch_index, None
+        self._clean_leftovers()
+        if not job.output:
+            return
+        part = partial_path(job.output)
+        playlist = playlist_path(part)
+        files = [part, playlist, playlist.with_name(playlist.name + ".tmp")]
+        if done and id(job) in self._watched and index is not None and index.part == part and part.exists():
+            index.write(playlist, finished=True)
+            self._leftovers += files
+            return
+        self._leftovers += files
+        self._clean_leftovers()
+
+    def _clean_leftovers(self) -> None:
+        keep = []
+        for p in self._leftovers:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                keep.append(p)
+        self._leftovers = keep
+
+    def _watch(self, row: int | None) -> None:
+        part = self._watchable(row)
+        if part is None:
+            return
+        self._watched.add(id(self.jobs[row]))
+        player = find_player()
+        if player is None:
+            QMessageBox.information(self, "kukkiri", tr(
+                "To watch a video while it is restored, install VLC (videolan.org): kukkiri opens it there and it keeps "
+                "playing as the restore goes on. The finished video plays in any player."))
+            return
+        QProcess.startDetached(player[0], player[1:] + [str(part)])
 
     def closeEvent(self, e):
         if self.proc is not None:
@@ -840,6 +1029,7 @@ class MainWindow(QMainWindow):
                 e.ignore()
                 return
             self._cancel()
+        self._clean_leftovers()
         e.accept()
 
 
